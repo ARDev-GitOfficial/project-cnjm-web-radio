@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
-import { fetchPublicAds, getVisibleAds, type SiteAd } from "../lib/ads";
+import { buildAdRotation, fetchPublicAds, getVisibleAds, type SiteAd } from "../lib/ads";
 
 export function usePublicAds(selectAd?: (ad: SiteAd) => boolean) {
   const queryClient = useQueryClient();
@@ -26,7 +26,8 @@ export function usePublicAds(selectAd?: (ad: SiteAd) => boolean) {
   const ads = useMemo(() => {
     if (!query.data) return [];
     const visibleAds = getVisibleAds(query.data.ads, query.data.settings);
-    return selectAd ? visibleAds.filter(selectAd) : visibleAds;
+    const selectedAds = selectAd ? visibleAds.filter(selectAd) : visibleAds;
+    return buildAdRotation(selectedAds, query.data.settings);
   }, [query.data, selectAd]);
 
   return {

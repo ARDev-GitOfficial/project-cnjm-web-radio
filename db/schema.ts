@@ -30,5 +30,23 @@ export const adSettings = pgTable("ad_settings", {
   scheduleEnabled: boolean("schedule_enabled").notNull().default(false),
   startTime: text("start_time").notNull().default("08:00"),
   endTime: text("end_time").notNull().default("22:00"),
+  commercialRuns: integer("commercial_runs").notNull().default(3),
+  programRuns: integer("program_runs").notNull().default(1),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const stationPrograms = pgTable("station_programs", {
+  id: text("id").primaryKey(),
+  dayId: text("day_id").notNull().default("Mon"),
+  dayLabel: text("day_label").notNull().default("Segunda"),
+  startTime: text("start_time").notNull().default("00:00"),
+  endTime: text("end_time").notNull().default("23:59"),
+  program: text("program").notNull().default(""),
+  host: text("host").notNull().default("Web Rádio Conexão Jamaica"),
+  logoUrl: text("logo_url").notNull().default(""),
+  logoKey: text("logo_key").notNull().default(""),
+  active: boolean("active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

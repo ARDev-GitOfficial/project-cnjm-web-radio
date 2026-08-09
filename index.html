@@ -16,6 +16,25 @@
     <meta name="apple-mobile-web-app-title" content="CNJMRadio" />
     <meta name="format-detection" content="telephone=no" />
     <meta name="theme-color" content="#030603" />
+    <script>
+      (() => {
+        const host = window.location.hostname;
+        if (host === "localhost" || host === "127.0.0.1") return;
+
+        const imageUrl = (src, width, quality) => {
+          const params = new URLSearchParams({
+            url: new URL(src, window.location.origin).href,
+            w: String(width),
+            fm: "webp",
+            q: String(quality),
+          });
+          return `/.netlify/images?${params.toString()}`;
+        };
+
+        document.documentElement.style.setProperty("--background-image", `url("${imageUrl("/assets/cnjmradio-total-background.png", 1600, 76)}")`);
+        document.documentElement.style.setProperty("--mobile-background-image", `url("${imageUrl("/assets/glass-ref-background-app.png", 920, 74)}")`);
+      })();
+    </script>
     <meta property="og:site_name" content="Web Rádio Conexão Jamaica" />
     <meta property="og:locale" content="pt_BR" />
     <meta property="og:title" content="Web Rádio Conexão Jamaica | Reggae ao vivo" />

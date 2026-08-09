@@ -1,4 +1,4 @@
-export type AdPlacement = "banner" | "sponsor" | "general";
+export type AdPlacement = "commercial" | "program";
 export type AdsSource = "database" | "local" | "fallback";
 
 export type SiteAd = {
@@ -30,6 +30,8 @@ export type AdSettings = {
   scheduleEnabled: boolean;
   startTime: string;
   endTime: string;
+  commercialRuns: number;
+  programRuns: number;
 };
 
 export type AdsPayload = {
@@ -89,6 +91,8 @@ export const defaultAdSettings = (): AdSettings => ({
   scheduleEnabled: false,
   startTime: "08:00",
   endTime: "22:00",
+  commercialRuns: 3,
+  programRuns: 1,
 });
 
 export const emptyAd = (): SiteAd => {
@@ -106,7 +110,7 @@ export const emptyAd = (): SiteAd => {
     imageSize: null,
     linkUrl: "",
     buttonLabel: "Abrir anúncio",
-    placement: "banner",
+    placement: "commercial",
     section: "Principal",
     active: true,
     impressions: 0,
@@ -159,6 +163,8 @@ export function normalizeAdSettings(settings: Partial<AdSettings> = {}): AdSetti
     scheduleEnabled: Boolean(settings.scheduleEnabled),
     startTime,
     endTime,
+    commercialRuns: normalizeRunCount(settings.commercialRuns, fallback.commercialRuns),
+    programRuns: normalizeRunCount(settings.programRuns, fallback.programRuns),
   };
 }
 
@@ -219,6 +225,45 @@ export function getVisibleAds(ads: SiteAd[], settings: AdSettings, now = new Dat
       (ad.title || ad.description || ad.imageUrl) &&
       isAdWithinDateWindow(ad, now),
   );
+}
+
+export function buildAdRotation(ads: SiteAd[], settings: AdSettings) {
+  const commercialAds = ads.filter((ad) => ad.placement !== "program");
+  const programAds = ads.filter((ad) => ad.placement === "program");
+  const commercialRuns = Math.max(1, Math.min(12, Number(settings.commercialRuns) || 3));
+  const programRuns = Math.max(0, Math.min(6, Number(settings.programRuns) || 1));
+
+  if (!commercialAds.length) return programAds;
+  if (!programAds.length || programRuns === 0) return commercialAds;
+
+  const result: SiteAd[] = [];
+  let commercialIndex = 0;
+  let programIndex = 0;
+  const targetLength = commercialAds.length + programAds.length;
+
+  while (result.length < targetLength) {
+    for (let index = 0; index < commercialRuns && commercialIndex < commercialAds.length; index += 1) {
+      result.push(commercialAds[commercialIndex]);
+      commercialIndex += 1;
+    }
+
+    for (let index = 0; index < programRuns && programIndex < programAds.length; index += 1) {
+      result.push(programAds[programIndex]);
+      programIndex += 1;
+    }
+
+    if (commercialIndex >= commercialAds.length && programIndex >= programAds.length) break;
+    if (commercialIndex >= commercialAds.length) {
+      result.push(...programAds.slice(programIndex));
+      break;
+    }
+    if (programIndex >= programAds.length) {
+      result.push(...commercialAds.slice(commercialIndex));
+      break;
+    }
+  }
+
+  return result;
 }
 
 export function updateAdStats(id: string, field: "impressions" | "clicks") {
@@ -526,7 +571,12 @@ async function sha256Hex(value: string) {
 }
 
 function normalizePlacement(value: unknown): AdPlacement {
-  return value === "sponsor" || value === "general" || value === "banner" ? value : "banner";
+  return value === "program" ? "program" : "commercial";
+}
+
+function normalizeRunCount(value: unknown, fallback: number) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(12, Math.round(number))) : fallback;
 }
 
 function normalizeNumberOrNull(value: unknown) {

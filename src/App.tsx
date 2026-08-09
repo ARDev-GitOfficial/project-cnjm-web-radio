@@ -10,6 +10,7 @@ import {
   ScheduleStationPage,
   SiteLayout,
 } from "./pages/HomePage";
+import { installOptimizedBackgroundImages } from "./lib/imageOptimization";
 import { PlayerProvider } from "./player/PlayerProvider";
 
 const AdsAdminPage = lazy(() =>
@@ -110,10 +111,19 @@ function SeoSync() {
 }
 
 function RouteFallback() {
-  return <div className="route-loading" aria-live="polite" />;
+  return (
+    <div className="route-loading" aria-live="polite">
+      <span />
+      <strong>Carregando</strong>
+    </div>
+  );
 }
 
 export default function App() {
+  useEffect(() => {
+    installOptimizedBackgroundImages();
+  }, []);
+
   return (
     <PlayerProvider>
       <BrowserRouter>
@@ -132,7 +142,7 @@ export default function App() {
             <Route path="/politicas" element={<PoliciesStationPage />} />
           </Route>
           <Route
-            path="/ads"
+            path="/ads/*"
             element={
               <Suspense fallback={<RouteFallback />}>
                 <AdsAdminPage />

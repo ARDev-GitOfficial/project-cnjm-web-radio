@@ -30,6 +30,7 @@ import { RadioInlineAdCarousel } from "../components/RadioInlineAdCarousel";
 import { TapeRig } from "../components/TapeRig";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { fetchCamera, fetchChatMessages, fetchSchedule } from "../lib/api";
+import { optimizedStaticImageUrl } from "../lib/imageOptimization";
 import { usePlayer } from "../player/PlayerProvider";
 import type { ScheduleDay } from "../types";
 
@@ -45,7 +46,7 @@ const navItems: { to: string; label: string; icon: LucideIcon }[] = [
   { to: "/camera", label: "Câmera", icon: Camera },
   { to: "/equalizador", label: "Equalizador", icon: SlidersHorizontal },
   { to: "/politicas", label: "Privacidade", icon: ShieldCheck },
-  { to: "/ads", label: "Anúncios", icon: Megaphone },
+  { to: "/ads", label: "Gerenciar", icon: Megaphone },
 ];
 
 function cleanText(value: string) {
@@ -168,6 +169,10 @@ function findNextScheduleSlot(slots: ScheduleDay["slots"]) {
   return future[0]?.slot ?? slots.find((slot) => !slot.isNow) ?? null;
 }
 
+function findCurrentScheduleSlot(days: ScheduleDay[]) {
+  return days.flatMap((day) => day.slots).find((slot) => slot.isNow) ?? null;
+}
+
 export const SiteLayout = memo(function SiteLayout() {
   const { isPlaying, isBuffering, error, nowPlaying } = usePlayer();
   const location = useLocation();
@@ -280,9 +285,14 @@ export const RadioHomePage = memo(function RadioHomePage() {
     setVolume,
     refreshNowPlaying,
   } = usePlayer();
+  const scheduleLoader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
+  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 60000);
+  const currentProgram = useMemo(() => findCurrentScheduleSlot(scheduleData?.days ?? []), [scheduleData]);
   const trackTitle = cleanText(nowPlaying.track.title || "Programação ao vivo");
   const trackArtist = cleanText(nowPlaying.track.artist || STATION_NAME);
-  const cover = nowPlaying.track.coverUrl?.trim() || DEFAULT_COVER;
+  const currentProgramName = cleanText(currentProgram?.program || "Programação musical");
+  const defaultCover = optimizedStaticImageUrl(DEFAULT_COVER, { width: 360, height: 360, quality: 84 });
+  const cover = nowPlaying.track.coverUrl?.trim() || currentProgram?.logoUrl?.trim() || defaultCover;
 
   return (
     <main className="radio-page">
@@ -312,6 +322,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
                   }}
                 />
                 <div>
+                  <small className="current-program-chip">No ar: {currentProgramName}</small>
                   <MarqueeText as="strong" text={trackTitle} />
                   <span>{trackArtist}</span>
                 </div>
@@ -350,7 +361,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
           </div>
 
           <div className="radio-visual-card">
-            <TapeRig isPlaying={isPlaying || isBuffering} />
+            <TapeRig analyser={analyser} isPlaying={isPlaying || isBuffering} />
           </div>
         </div>
       </section>

@@ -12,9 +12,46 @@ const ADMIN_PASSWORD_HASH =
   process.env.CNJM_ADS_ADMIN_PASSWORD_HASH ||
   (process.env.CNJM_ADS_ADMIN_PASSWORD ? sha256Hex(process.env.CNJM_ADS_ADMIN_PASSWORD) : DEFAULT_ADMIN_PASSWORD_HASH);
 const ADMIN_TOKEN = process.env.CNJM_ADS_ADMIN_TOKEN || ADMIN_PASSWORD_HASH;
+const BLOB_SITE_ID_ENV_KEYS = ["NETLIFY_BLOBS_SITE_ID", "NETLIFY_BLOBS_SITEID", "NETLIFY_SITE_ID", "SITE_ID"];
+const BLOB_TOKEN_ENV_KEYS = ["NETLIFY_BLOBS_TOKEN", "NETLIFY_AUTH_TOKEN", "NETLIFY_API_TOKEN"];
 
 function db() {
   return getDatabase().sql;
+}
+
+function firstEnv(keys) {
+  for (const key of keys) {
+    const value = String(process.env[key] || "").trim();
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function manualBlobConfig() {
+  const siteID = firstEnv(BLOB_SITE_ID_ENV_KEYS);
+  const token = firstEnv(BLOB_TOKEN_ENV_KEYS);
+
+  return siteID && token ? { siteID, token } : null;
+}
+
+function blobConfigError() {
+  return new Error(
+    "Netlify Blobs ainda não está configurado para uploads. Adicione NETLIFY_BLOBS_SITE_ID com o Project ID e NETLIFY_BLOBS_TOKEN com um Personal Access Token nas variáveis de ambiente do Netlify.",
+  );
+}
+
+function adImageStore() {
+  try {
+    const manualConfig = manualBlobConfig();
+    return manualConfig ? getStore({ name: ADS_BLOB_STORE, ...manualConfig }) : getStore(ADS_BLOB_STORE);
+  } catch (error) {
+    if (error?.name === "MissingBlobsEnvironmentError") {
+      throw blobConfigError();
+    }
+
+    throw error;
+  }
 }
 
 function normalizeOptionalUrl(value) {
@@ -469,7 +506,7 @@ export async function saveAdImage(payload) {
 
   const bytes = Buffer.from(dataBase64, "base64");
   const key = `ad-${Date.now()}-${randomUUID()}.png`;
-  const store = getStore(ADS_BLOB_STORE);
+  const store = adImageStore();
   await store.set(key, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), {
     metadata: {
       contentType,
@@ -493,7 +530,7 @@ export async function readAdImage(key) {
   const safeKey = String(key || "").replace(/^\/+/, "");
   if (!safeKey || safeKey.includes("..")) return null;
 
-  const store = getStore(ADS_BLOB_STORE);
+  const store = adImageStore();
   const blob = await store.get(safeKey, { type: "arrayBuffer" });
   if (!blob) return null;
 

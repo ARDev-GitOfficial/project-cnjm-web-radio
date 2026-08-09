@@ -1,3 +1,4 @@
+import { connectLambda } from "@netlify/blobs";
 import {
   adminSessionPayload,
   deleteAd,
@@ -23,6 +24,16 @@ const MUSIC_LOOKUP_URL = "https://itunes.apple.com/search";
 
 const SAFE_NOW_PLAYING = "Web Rádio Conexão Jamaica - Programação ao vivo";
 let lastPublicTrack = null;
+
+function connectNetlifyBlobs(event) {
+  if (!event?.blobs) return;
+
+  try {
+    connectLambda(event);
+  } catch {
+    // Manual NETLIFY_BLOBS_SITE_ID/NETLIFY_BLOBS_TOKEN config remains available.
+  }
+}
 
 const dayOrder = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const dayNames = {
@@ -843,6 +854,8 @@ async function handleAds(event, pathname) {
 }
 
 export async function handler(event) {
+  connectNetlifyBlobs(event);
+
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: baseHeaders, body: "" };
   }

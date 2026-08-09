@@ -1,0 +1,23 @@
+[build]
+  command = "pnpm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "24"
+  PNPM_VERSION = "9.15.4"
+  COREPACK_ENABLE_STRICT = "0"
+  COREPACK_INTEGRITY_KEYS = "0"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

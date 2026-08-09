@@ -1,0 +1,36 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
+import { fetchPublicAds, getVisibleAds, type SiteAd } from "../lib/ads";
+
+export function usePublicAds(selectAd?: (ad: SiteAd) => boolean) {
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    queryKey: ["public-ads"],
+    queryFn: ({ signal }) => fetchPublicAds(signal),
+    refetchInterval: 60_000,
+  });
+
+  useEffect(() => {
+    const reload = () => {
+      void queryClient.invalidateQueries({ queryKey: ["public-ads"] });
+    };
+
+    window.addEventListener("storage", reload);
+    window.addEventListener("cnjm-ads-updated", reload);
+    return () => {
+      window.removeEventListener("storage", reload);
+      window.removeEventListener("cnjm-ads-updated", reload);
+    };
+  }, [queryClient]);
+
+  const ads = useMemo(() => {
+    if (!query.data) return [];
+    const visibleAds = getVisibleAds(query.data.ads, query.data.settings);
+    return selectAd ? visibleAds.filter(selectAd) : visibleAds;
+  }, [query.data, selectAd]);
+
+  return {
+    ...query,
+    ads,
+  };
+}

@@ -1,7 +1,5 @@
 import { getStore } from "@netlify/blobs";
-import { drizzle } from "drizzle-orm/netlify-db";
-import { and, desc, eq, gte, isNull, lte, or, sql } from "drizzle-orm";
-import { boolean, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { getDatabase } from "@netlify/database";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const AD_BANNER_WIDTH = 1700;
@@ -15,41 +13,8 @@ const ADMIN_PASSWORD_HASH =
   (process.env.CNJM_ADS_ADMIN_PASSWORD ? sha256Hex(process.env.CNJM_ADS_ADMIN_PASSWORD) : DEFAULT_ADMIN_PASSWORD_HASH);
 const ADMIN_TOKEN = process.env.CNJM_ADS_ADMIN_TOKEN || ADMIN_PASSWORD_HASH;
 
-const siteAds = pgTable("site_ads", {
-  id: text("id").primaryKey(),
-  title: text("title").notNull().default(""),
-  description: text("description").notNull().default(""),
-  imageUrl: text("image_url").notNull().default(""),
-  imageKey: text("image_key").notNull().default(""),
-  imageWidth: integer("image_width"),
-  imageHeight: integer("image_height"),
-  imageContentType: text("image_content_type"),
-  imageSize: integer("image_size"),
-  linkUrl: text("link_url").notNull().default(""),
-  buttonLabel: text("button_label").notNull().default("Abrir anúncio"),
-  placement: text("placement").notNull().default("banner"),
-  section: text("section").notNull().default("Principal"),
-  active: boolean("active").notNull().default(true),
-  impressions: integer("impressions").notNull().default(0),
-  clicks: integer("clicks").notNull().default(0),
-  sortOrder: integer("sort_order").notNull().default(0),
-  startsAt: timestamp("starts_at", { withTimezone: true }),
-  endsAt: timestamp("ends_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-const adSettings = pgTable("ad_settings", {
-  id: text("id").primaryKey().default("global"),
-  enabled: boolean("enabled").notNull().default(true),
-  scheduleEnabled: boolean("schedule_enabled").notNull().default(false),
-  startTime: text("start_time").notNull().default("08:00"),
-  endTime: text("end_time").notNull().default("22:00"),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
 function db() {
-  return drizzle({ schema: { siteAds, adSettings } });
+  return getDatabase().sql;
 }
 
 function normalizeOptionalUrl(value) {
@@ -120,14 +85,6 @@ export function normalizeSettingsPayload(settings = {}) {
   };
 }
 
-function publicAdFilter(now = new Date()) {
-  return and(
-    eq(siteAds.active, true),
-    or(isNull(siteAds.startsAt), lte(siteAds.startsAt, now)),
-    or(isNull(siteAds.endsAt), gte(siteAds.endsAt, now)),
-  );
-}
-
 function serializeAd(row) {
   return {
     id: row.id,
@@ -168,12 +125,36 @@ export async function listPublicAds() {
   const now = new Date();
   const [settings, ads] = await Promise.all([
     getAdSettings(),
-    database
-      .select()
-      .from(siteAds)
-      .where(publicAdFilter(now))
-      .orderBy(siteAds.sortOrder, desc(siteAds.updatedAt))
-      .limit(MAX_ADS),
+    database`
+      SELECT
+        id,
+        title,
+        description,
+        image_url AS "imageUrl",
+        image_key AS "imageKey",
+        image_width AS "imageWidth",
+        image_height AS "imageHeight",
+        image_content_type AS "imageContentType",
+        image_size AS "imageSize",
+        link_url AS "linkUrl",
+        button_label AS "buttonLabel",
+        placement,
+        section,
+        active,
+        impressions,
+        clicks,
+        sort_order AS "sortOrder",
+        starts_at AS "startsAt",
+        ends_at AS "endsAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM site_ads
+      WHERE active = TRUE
+        AND (starts_at IS NULL OR starts_at <= ${now})
+        AND (ends_at IS NULL OR ends_at >= ${now})
+      ORDER BY sort_order ASC, updated_at DESC
+      LIMIT ${MAX_ADS}
+    `,
   ]);
 
   return {
@@ -186,7 +167,33 @@ export async function listAdminAds() {
   const database = db();
   const [settings, ads] = await Promise.all([
     getAdSettings(),
-    database.select().from(siteAds).orderBy(siteAds.sortOrder, desc(siteAds.updatedAt)).limit(MAX_ADS),
+    database`
+      SELECT
+        id,
+        title,
+        description,
+        image_url AS "imageUrl",
+        image_key AS "imageKey",
+        image_width AS "imageWidth",
+        image_height AS "imageHeight",
+        image_content_type AS "imageContentType",
+        image_size AS "imageSize",
+        link_url AS "linkUrl",
+        button_label AS "buttonLabel",
+        placement,
+        section,
+        active,
+        impressions,
+        clicks,
+        sort_order AS "sortOrder",
+        starts_at AS "startsAt",
+        ends_at AS "endsAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM site_ads
+      ORDER BY sort_order ASC, updated_at DESC
+      LIMIT ${MAX_ADS}
+    `,
   ]);
 
   return {
@@ -197,67 +204,189 @@ export async function listAdminAds() {
 
 export async function getAdSettings() {
   const database = db();
-  const rows = await database.select().from(adSettings).where(eq(adSettings.id, "global")).limit(1);
+  const rows = await database`
+    SELECT
+      enabled,
+      schedule_enabled AS "scheduleEnabled",
+      start_time AS "startTime",
+      end_time AS "endTime"
+    FROM ad_settings
+    WHERE id = 'global'
+    LIMIT 1
+  `;
   if (rows[0]) return serializeSettings(rows[0]);
 
-  const [created] = await database.insert(adSettings).values({ id: "global" }).returning();
+  const [created] = await database`
+    INSERT INTO ad_settings (id)
+    VALUES ('global')
+    ON CONFLICT (id) DO NOTHING
+    RETURNING
+      enabled,
+      schedule_enabled AS "scheduleEnabled",
+      start_time AS "startTime",
+      end_time AS "endTime"
+  `;
+  if (!created) return serializeSettings(null);
+
   return serializeSettings(created);
 }
 
 export async function saveAdSettings(payload) {
   const normalized = normalizeSettingsPayload(payload);
-  const [settings] = await db()
-    .insert(adSettings)
-    .values(normalized)
-    .onConflictDoUpdate({
-      target: adSettings.id,
-      set: {
-        enabled: normalized.enabled,
-        scheduleEnabled: normalized.scheduleEnabled,
-        startTime: normalized.startTime,
-        endTime: normalized.endTime,
-        updatedAt: normalized.updatedAt,
-      },
-    })
-    .returning();
+  const [settings] = await db()`
+    INSERT INTO ad_settings (
+      id,
+      enabled,
+      schedule_enabled,
+      start_time,
+      end_time,
+      updated_at
+    )
+    VALUES (
+      'global',
+      ${normalized.enabled},
+      ${normalized.scheduleEnabled},
+      ${normalized.startTime},
+      ${normalized.endTime},
+      ${normalized.updatedAt}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      enabled = EXCLUDED.enabled,
+      schedule_enabled = EXCLUDED.schedule_enabled,
+      start_time = EXCLUDED.start_time,
+      end_time = EXCLUDED.end_time,
+      updated_at = EXCLUDED.updated_at
+    RETURNING
+      enabled,
+      schedule_enabled AS "scheduleEnabled",
+      start_time AS "startTime",
+      end_time AS "endTime"
+  `;
 
   return serializeSettings(settings);
 }
 
 export async function saveAd(payload) {
   const normalized = normalizeAdPayload(payload);
-  const [ad] = await db()
-    .insert(siteAds)
-    .values(normalized)
-    .onConflictDoUpdate({
-      target: siteAds.id,
-      set: {
-        title: normalized.title,
-        description: normalized.description,
-        imageUrl: normalized.imageUrl,
-        imageKey: normalized.imageKey,
-        imageWidth: normalized.imageWidth,
-        imageHeight: normalized.imageHeight,
-        imageContentType: normalized.imageContentType,
-        imageSize: normalized.imageSize,
-        linkUrl: normalized.linkUrl,
-        buttonLabel: normalized.buttonLabel,
-        placement: normalized.placement,
-        section: normalized.section,
-        active: normalized.active,
-        sortOrder: normalized.sortOrder,
-        startsAt: normalized.startsAt,
-        endsAt: normalized.endsAt,
-        updatedAt: normalized.updatedAt,
-      },
-    })
-    .returning();
+  const [ad] = await db()`
+    INSERT INTO site_ads (
+      id,
+      title,
+      description,
+      image_url,
+      image_key,
+      image_width,
+      image_height,
+      image_content_type,
+      image_size,
+      link_url,
+      button_label,
+      placement,
+      section,
+      active,
+      impressions,
+      clicks,
+      sort_order,
+      starts_at,
+      ends_at,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      ${normalized.id},
+      ${normalized.title},
+      ${normalized.description},
+      ${normalized.imageUrl},
+      ${normalized.imageKey},
+      ${normalized.imageWidth},
+      ${normalized.imageHeight},
+      ${normalized.imageContentType},
+      ${normalized.imageSize},
+      ${normalized.linkUrl},
+      ${normalized.buttonLabel},
+      ${normalized.placement},
+      ${normalized.section},
+      ${normalized.active},
+      ${normalized.impressions},
+      ${normalized.clicks},
+      ${normalized.sortOrder},
+      ${normalized.startsAt},
+      ${normalized.endsAt},
+      ${normalized.createdAt},
+      ${normalized.updatedAt}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      image_url = EXCLUDED.image_url,
+      image_key = EXCLUDED.image_key,
+      image_width = EXCLUDED.image_width,
+      image_height = EXCLUDED.image_height,
+      image_content_type = EXCLUDED.image_content_type,
+      image_size = EXCLUDED.image_size,
+      link_url = EXCLUDED.link_url,
+      button_label = EXCLUDED.button_label,
+      placement = EXCLUDED.placement,
+      section = EXCLUDED.section,
+      active = EXCLUDED.active,
+      sort_order = EXCLUDED.sort_order,
+      starts_at = EXCLUDED.starts_at,
+      ends_at = EXCLUDED.ends_at,
+      updated_at = EXCLUDED.updated_at
+    RETURNING
+      id,
+      title,
+      description,
+      image_url AS "imageUrl",
+      image_key AS "imageKey",
+      image_width AS "imageWidth",
+      image_height AS "imageHeight",
+      image_content_type AS "imageContentType",
+      image_size AS "imageSize",
+      link_url AS "linkUrl",
+      button_label AS "buttonLabel",
+      placement,
+      section,
+      active,
+      impressions,
+      clicks,
+      sort_order AS "sortOrder",
+      starts_at AS "startsAt",
+      ends_at AS "endsAt",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt"
+  `;
 
   return serializeAd(ad);
 }
 
 export async function deleteAd(id) {
-  const [ad] = await db().delete(siteAds).where(eq(siteAds.id, String(id))).returning();
+  const [ad] = await db()`
+    DELETE FROM site_ads
+    WHERE id = ${String(id)}
+    RETURNING
+      id,
+      title,
+      description,
+      image_url AS "imageUrl",
+      image_key AS "imageKey",
+      image_width AS "imageWidth",
+      image_height AS "imageHeight",
+      image_content_type AS "imageContentType",
+      image_size AS "imageSize",
+      link_url AS "linkUrl",
+      button_label AS "buttonLabel",
+      placement,
+      section,
+      active,
+      impressions,
+      clicks,
+      sort_order AS "sortOrder",
+      starts_at AS "startsAt",
+      ends_at AS "endsAt",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt"
+  `;
   return ad ? serializeAd(ad) : null;
 }
 
@@ -266,12 +395,62 @@ export async function updateAdStats(id, field) {
     throw new Error("Invalid stats field.");
   }
 
-  const column = field === "impressions" ? siteAds.impressions : siteAds.clicks;
-  const [ad] = await db()
-    .update(siteAds)
-    .set({ [field]: sql`${column} + 1`, updatedAt: new Date() })
-    .where(eq(siteAds.id, String(id)))
-    .returning();
+  const updatedAt = new Date();
+  const [ad] = field === "impressions"
+    ? await db()`
+        UPDATE site_ads
+        SET impressions = impressions + 1, updated_at = ${updatedAt}
+        WHERE id = ${String(id)}
+        RETURNING
+          id,
+          title,
+          description,
+          image_url AS "imageUrl",
+          image_key AS "imageKey",
+          image_width AS "imageWidth",
+          image_height AS "imageHeight",
+          image_content_type AS "imageContentType",
+          image_size AS "imageSize",
+          link_url AS "linkUrl",
+          button_label AS "buttonLabel",
+          placement,
+          section,
+          active,
+          impressions,
+          clicks,
+          sort_order AS "sortOrder",
+          starts_at AS "startsAt",
+          ends_at AS "endsAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+      `
+    : await db()`
+        UPDATE site_ads
+        SET clicks = clicks + 1, updated_at = ${updatedAt}
+        WHERE id = ${String(id)}
+        RETURNING
+          id,
+          title,
+          description,
+          image_url AS "imageUrl",
+          image_key AS "imageKey",
+          image_width AS "imageWidth",
+          image_height AS "imageHeight",
+          image_content_type AS "imageContentType",
+          image_size AS "imageSize",
+          link_url AS "linkUrl",
+          button_label AS "buttonLabel",
+          placement,
+          section,
+          active,
+          impressions,
+          clicks,
+          sort_order AS "sortOrder",
+          starts_at AS "startsAt",
+          ends_at AS "endsAt",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+      `;
 
   return ad ? serializeAd(ad) : null;
 }

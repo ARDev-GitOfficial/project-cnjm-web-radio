@@ -11,7 +11,7 @@ import {
   saveAdImage,
   saveAdSettings,
   updateAdStats,
-} from "./ads-store.mjs";
+} from "../lib/ads-store.mjs";
 
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";

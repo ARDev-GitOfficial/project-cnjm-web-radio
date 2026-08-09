@@ -1,0 +1,26 @@
+{
+  "name": "Web Radio Conexao Jamaica",
+  "short_name": "CNJMRadio",
+  "description": "Reggae em todas as vertentes, programacao online, pedidos musicais, bate-papo e camera do estudio.",
+  "start_url": "/radio",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#030603",
+  "theme_color": "#030603",
+  "orientation": "portrait-primary",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/assets/cnjmradio-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/cnjmradio-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

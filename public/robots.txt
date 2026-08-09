@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /ads
+Disallow: /api/
+
+Sitemap: https://webradioconexaojamaica.com/sitemap.xml

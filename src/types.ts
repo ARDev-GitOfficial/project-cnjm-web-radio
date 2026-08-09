@@ -4,12 +4,15 @@ export type Track = {
   title: string;
   artist: string;
   raw: string;
+  album?: string | null;
   coverUrl?: string | null;
 };
 
 export type StreamStats = {
   listeners: number;
   peakListeners: number;
+  uniqueListeners: number;
+  streamHits: number;
   genre: string;
   bitrate: string;
   isOnline: boolean;

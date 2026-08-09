@@ -1,11 +1,29 @@
+import {
+  adminSessionPayload,
+  deleteAd,
+  getAdSettings,
+  isAdminRequest,
+  isValidAdminLogin,
+  listAdminAds,
+  listPublicAds,
+  readAdImage,
+  saveAd,
+  saveAdImage,
+  saveAdSettings,
+  updateAdStats,
+} from "../lib/ads-store.mjs";
+
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
 const TIMETABLE_URL = "https://radioconexcaojamaica.com.br/timetable";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
 const COVER_URL = "https://player.svrdedicado.org/one-page/7586/cover";
 const CHAT_MESSAGES_URL = "https://player.svrdedicado.org/chat/7586/lista?limit=80";
+const MUSIC_LOOKUP_URL = "https://itunes.apple.com/search";
 
 const SAFE_NOW_PLAYING = "Web Rádio Conexão Jamaica - Programação ao vivo";
+let lastPublicTrack = null;
+
 const dayOrder = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const dayNames = {
   Sun: "Domingo",
@@ -29,20 +47,64 @@ const technicalTrackPatterns = [
   /\bhttps?:/i,
   new RegExp(["whats", "app\\s+audio"].join(""), "i"),
   /\baudio\s+20\d{2}\b/i,
+  /\bsinal\s+de\s+hora\b/i,
+  /\bhora\s+certa\b/i,
   /conex[aã]o\s+jamaica\s+power\s+\d+(?:\s+mp3)?(?:\.mp3)?/i,
   /programa\s+reggae\s+point\s*2\s*mp3(?:\.mp3)?/i,
-  /\b(?:vinheta|jingle|chamada)\b/i,
+  /\b(?:vinheta|jingle|chamada|comercial|publicidade|patroc[ií]nio|patrocinador)\b/i,
   /^7586\b/i,
   /^empty\s+title$/i,
   /^(?:unknown|untitled|sem\s+título|sem\s+titulo)$/i,
 ];
 
+const technicalTrackPhrases = [
+  "a verdadeira musica da jamaica",
+  "conexao jamaica power",
+  "jamaica vem ate vc",
+  "jamaica vem ate voce",
+  "no clima da jamica",
+  "no clima da jamaica",
+  "pdras rolam aqui",
+  "pedras rolam aqui",
+  "programa reggae point",
+  "sinta se na jamaica",
+  "uma viagem",
+  "whatsapp audio",
+  "hora certa voz masculina",
+];
+
+const weakLookupTokens = new Set([
+  "web",
+  "radio",
+  "conexao",
+  "jamaica",
+  "reggae",
+  "programacao",
+  "vivo",
+  "musica",
+  "music",
+  "official",
+  "audio",
+  "video",
+  "remaster",
+  "remastered",
+  "the",
+  "and",
+  "feat",
+  "ft",
+  "com",
+  "para",
+  "das",
+  "dos",
+  "uma",
+]);
+
 const baseHeaders = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET,OPTIONS",
-  "access-control-allow-headers": "Content-Type",
+  "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+  "access-control-allow-headers": "Content-Type, Authorization",
 };
 
 function json(statusCode, payload) {
@@ -51,6 +113,40 @@ function json(statusCode, payload) {
     headers: baseHeaders,
     body: JSON.stringify(payload),
   };
+}
+
+function methodNotAllowed() {
+  return json(405, { ok: false, message: "Método não permitido." });
+}
+
+function badRequest(message = "Requisição inválida.") {
+  return json(400, { ok: false, message });
+}
+
+function unauthorized() {
+  return json(401, { ok: false, message: "Acesso administrativo necessário." });
+}
+
+function serverError(error, fallback = "Não foi possível concluir a operação.") {
+  return json(500, {
+    ok: false,
+    message: error instanceof Error && error.message ? error.message : fallback,
+  });
+}
+
+function fallbackAdSettings() {
+  return {
+    enabled: true,
+    scheduleEnabled: false,
+    startTime: "08:00",
+    endTime: "22:00",
+  };
+}
+
+function readJsonBody(event) {
+  if (!event.body) return {};
+  const body = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
+  return JSON.parse(body);
 }
 
 async function fetchText(url) {
@@ -101,13 +197,45 @@ function normalizePublicText(value) {
   return decodeHtml(value).normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
+function normalizeComparableTrackText(value) {
+  return normalizePublicText(value)
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/(?:\s+mp3|\.(?:mp3|wav|aac|m4a|ogg|flac))+$/gi, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function cleanTrackPart(value) {
+  return normalizePublicText(value)
+    .replace(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/, "")
+    .replace(/(?:\s+mp3|\.(?:mp3|wav|aac|m4a|ogg|flac))+$/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function trackTokens(...values) {
+  return values
+    .flatMap((value) => normalizeComparableTrackText(value).split(/\s+/))
+    .filter((token) => token.length > 2 && !weakLookupTokens.has(token));
+}
+
 function isTechnicalTrack(...values) {
   const fields = values.map(normalizePublicText).filter(Boolean);
   const text = fields.join(" ");
   if (!text) return true;
 
+  const comparableFields = fields.map(normalizeComparableTrackText).filter(Boolean);
+  const comparableText = comparableFields.join(" ");
+
   return fields.some((field) => technicalTrackPatterns.some((pattern) => pattern.test(field))) ||
-    technicalTrackPatterns.some((pattern) => pattern.test(text));
+    technicalTrackPatterns.some((pattern) => pattern.test(text)) ||
+    technicalTrackPhrases.some((phrase) =>
+      comparableFields.some((field) => field.includes(phrase)) || comparableText.includes(phrase),
+    );
 }
 
 function isDisplayableHistoryTime(value) {
@@ -165,13 +293,13 @@ async function fetchCoverUrl() {
 }
 
 function parseTrack(rawValue) {
-  const raw = decodeHtml(rawValue || "Web Rádio Conexão Jamaica - Reggae ao vivo");
-  const parts = raw.split(/\s(?:-|–|—|\||\/)\s/).map((part) => part.trim()).filter(Boolean);
+  const raw = cleanTrackPart(rawValue || "Web Rádio Conexão Jamaica - Reggae ao vivo");
+  const parts = raw.split(/\s(?:-|–|—|\||\/)\s/).map(cleanTrackPart).filter(Boolean);
 
   if (parts.length >= 2) {
     return {
-      artist: parts[0],
-      title: parts.slice(1).join(" - "),
+      artist: cleanTrackPart(parts[0]),
+      title: cleanTrackPart(parts.slice(1).join(" - ")),
       raw,
     };
   }
@@ -185,6 +313,93 @@ function parseTrack(rawValue) {
 
 function parseSafeTrack(rawValue) {
   return isTechnicalTrack(rawValue) ? parseTrack(SAFE_NOW_PLAYING) : parseTrack(rawValue);
+}
+
+function lookupCoverUrl(candidate) {
+  const clean = normalizePublicText(candidate);
+  if (!clean) return null;
+  return clean
+    .replace(/(?:30|60|100)x(?:30|60|100)bb\.(jpg|png|webp)$/i, "600x600bb.$1")
+    .replace(/(?:30|60|100)x(?:30|60|100)-75\.(jpg|png|webp)$/i, "600x600-75.$1");
+}
+
+function isUsefulLookupResult(baseTrack, candidate) {
+  const baseTokens = new Set(trackTokens(baseTrack.artist, baseTrack.title));
+  const candidateTokens = new Set(trackTokens(candidate.artist, candidate.title));
+  if (!baseTokens.size || !candidateTokens.size) return false;
+
+  const overlap = [...baseTokens].filter((token) => candidateTokens.has(token)).length;
+  return overlap >= Math.min(2, baseTokens.size);
+}
+
+async function lookupMusicTrack(baseTrack) {
+  if (isTechnicalTrack(baseTrack.raw, baseTrack.title, baseTrack.artist)) return null;
+
+  const term = [baseTrack.artist, baseTrack.title]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (trackTokens(term).length < 2) return null;
+
+  try {
+    const url = new URL(MUSIC_LOOKUP_URL);
+    url.searchParams.set("term", term);
+    url.searchParams.set("entity", "song");
+    url.searchParams.set("media", "music");
+    url.searchParams.set("limit", "5");
+    url.searchParams.set("country", "BR");
+
+    const payload = await fetchJson(url.href);
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const match = results
+      .map((result) => ({
+        artist: cleanTrackPart(result.artistName || ""),
+        title: cleanTrackPart(result.trackName || ""),
+        album: cleanTrackPart(result.collectionName || result.collectionCensoredName || ""),
+        coverUrl: lookupCoverUrl(result.artworkUrl100 || result.artworkUrl60 || result.artworkUrl30 || ""),
+      }))
+      .find((candidate) => candidate.artist && candidate.title && isUsefulLookupResult(baseTrack, candidate));
+
+    if (!match) return null;
+
+    return {
+      artist: match.artist,
+      title: match.title,
+      album: match.album || null,
+      raw: `${match.artist} - ${match.title}`,
+      coverUrl: isSafeCoverUrl(match.coverUrl) ? match.coverUrl : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeTrackFromHistory(history) {
+  const item = history.find((entry) => !isTechnicalTrack(entry.raw, entry.title, entry.artist));
+  return item ? { artist: item.artist, title: item.title, raw: item.raw, album: null, coverUrl: null } : null;
+}
+
+async function resolveNowPlayingTrack(rawValue, coverUrl, history) {
+  const directTrack = parseTrack(rawValue);
+  const isBlocked = isTechnicalTrack(rawValue, directTrack.raw, directTrack.title, directTrack.artist);
+
+  if (isBlocked) {
+    return {
+      ...(lastPublicTrack ?? safeTrackFromHistory(history) ?? parseTrack(SAFE_NOW_PLAYING)),
+      coverUrl: lastPublicTrack?.coverUrl ?? coverUrl ?? null,
+    };
+  }
+
+  const apiTrack = await lookupMusicTrack(directTrack);
+  const nextTrack = {
+    ...(apiTrack ?? directTrack),
+    album: apiTrack?.album ?? null,
+    coverUrl: apiTrack?.coverUrl ?? coverUrl ?? null,
+  };
+
+  lastPublicTrack = nextTrack;
+  return nextTrack;
 }
 
 function safeHistoryFallback() {
@@ -335,11 +550,8 @@ async function handleNowPlaying() {
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
     ]);
-    const track = {
-      ...parseSafeTrack(stats.songtitle ?? ""),
-      coverUrl,
-    };
     const history = parseHistory(historyHtml);
+    const track = await resolveNowPlayingTrack(stats.songtitle ?? "", coverUrl, history);
 
     return json(200, {
       ok: true,
@@ -348,6 +560,8 @@ async function handleNowPlaying() {
       stats: {
         listeners: Number(stats.currentlisteners ?? 0),
         peakListeners: Number(stats.peaklisteners ?? 0),
+        uniqueListeners: Number(stats.uniquelisteners ?? 0),
+        streamHits: Number(stats.streamhits ?? 0),
         genre: stats.servergenre ?? "Reggae",
         bitrate: stats.bitrate ?? "128",
         isOnline: Number(stats.streamstatus ?? 0) === 1,
@@ -367,6 +581,8 @@ async function handleNowPlaying() {
       stats: {
         listeners: 0,
         peakListeners: 0,
+        uniqueListeners: 0,
+        streamHits: 0,
         genre: "Reggae",
         bitrate: "128",
         isOnline: true,
@@ -452,16 +668,192 @@ function apiPath(event) {
     .replace(/\/$/, "") || "/";
 }
 
+async function handleAds(event, pathname) {
+  const method = event.httpMethod || "GET";
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (pathname === "/ads/login") {
+    if (method !== "POST") return methodNotAllowed();
+
+    try {
+      const payload = readJsonBody(event);
+      if (!isValidAdminLogin(payload)) {
+        return json(401, { ok: false, message: "Login ou senha inválidos." });
+      }
+
+      return json(200, {
+        ok: true,
+        session: adminSessionPayload(),
+      });
+    } catch {
+      return badRequest("Não foi possível ler o login enviado.");
+    }
+  }
+
+  if (parts[0] === "ads" && parts[1] === "image") {
+    if (method !== "GET") return methodNotAllowed();
+
+    try {
+      const image = await readAdImage(decodeURIComponent(parts.slice(2).join("/")));
+      if (!image) return json(404, { ok: false, message: "Imagem não encontrada." });
+
+      return {
+        statusCode: 200,
+        isBase64Encoded: true,
+        headers: {
+          "content-type": image.contentType,
+          "cache-control": "public, max-age=31536000, immutable",
+          "access-control-allow-origin": "*",
+        },
+        body: image.body,
+      };
+    } catch (error) {
+      return serverError(error, "Não foi possível abrir a imagem do anúncio.");
+    }
+  }
+
+  if (pathname === "/ads") {
+    if (method === "GET") {
+      try {
+        const data = await listPublicAds();
+        return json(200, {
+          ok: true,
+          source: "database",
+          ...data,
+          fetchedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        return json(200, {
+          ok: false,
+          source: "fallback",
+          ads: [],
+          settings: fallbackAdSettings(),
+          fetchedAt: new Date().toISOString(),
+          message: error instanceof Error && error.message ? error.message : "Banco de anúncios indisponível.",
+        });
+      }
+    }
+
+    if (method === "POST") {
+      if (!isAdminRequest(event)) return unauthorized();
+
+      try {
+        const payload = readJsonBody(event);
+        const ad = await saveAd(payload.ad ?? payload);
+        return json(200, { ok: true, ad });
+      } catch (error) {
+        return serverError(error, "Não foi possível salvar o anúncio.");
+      }
+    }
+
+    return methodNotAllowed();
+  }
+
+  if (pathname === "/ads/admin") {
+    if (method !== "GET") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const data = await listAdminAds();
+      return json(200, {
+        ok: true,
+        source: "database",
+        ...data,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      return serverError(error, "Não foi possível carregar os anúncios.");
+    }
+  }
+
+  if (pathname === "/ads/settings") {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    if (method === "GET") {
+      try {
+        const settings = await getAdSettings();
+        return json(200, { ok: true, settings });
+      } catch (error) {
+        return serverError(error, "Não foi possível carregar as configurações.");
+      }
+    }
+
+    if (method === "PUT" || method === "POST") {
+      try {
+        const payload = readJsonBody(event);
+        const settings = await saveAdSettings(payload.settings ?? payload);
+        return json(200, { ok: true, settings });
+      } catch (error) {
+        return serverError(error, "Não foi possível salvar as configurações.");
+      }
+    }
+
+    return methodNotAllowed();
+  }
+
+  if (pathname === "/ads/upload") {
+    if (method !== "POST") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const payload = readJsonBody(event);
+      const image = await saveAdImage(payload);
+      return json(200, { ok: true, image });
+    } catch (error) {
+      return serverError(error, "Não foi possível enviar a imagem.");
+    }
+  }
+
+  if (parts[0] === "ads" && parts[2] === "stats") {
+    if (method !== "POST") return methodNotAllowed();
+
+    try {
+      const payload = readJsonBody(event);
+      const ad = await updateAdStats(parts[1], payload.field);
+      return json(200, { ok: true, ad });
+    } catch (error) {
+      return serverError(error, "Não foi possível atualizar as métricas.");
+    }
+  }
+
+  if (parts[0] === "ads" && parts[1]) {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    if (method === "PUT") {
+      try {
+        const payload = readJsonBody(event);
+        const ad = await saveAd({ ...(payload.ad ?? payload), id: parts[1] });
+        return json(200, { ok: true, ad });
+      } catch (error) {
+        return serverError(error, "Não foi possível atualizar o anúncio.");
+      }
+    }
+
+    if (method === "DELETE") {
+      try {
+        const ad = await deleteAd(parts[1]);
+        return json(200, { ok: true, ad });
+      } catch (error) {
+        return serverError(error, "Não foi possível excluir o anúncio.");
+      }
+    }
+  }
+
+  return json(404, { ok: false, message: "Endpoint de anúncios não encontrado." });
+}
+
 export async function handler(event) {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: baseHeaders, body: "" };
   }
 
+  const pathname = apiPath(event);
+  if (pathname === "/ads" || pathname.startsWith("/ads/")) return handleAds(event, pathname);
+
   if (event.httpMethod && event.httpMethod !== "GET") {
-    return json(405, { ok: false, message: "Método não permitido." });
+    return methodNotAllowed();
   }
 
-  const pathname = apiPath(event);
   if (pathname === "/now-playing") return handleNowPlaying();
   if (pathname === "/schedule") return handleSchedule();
   if (pathname === "/camera") return handleCamera();

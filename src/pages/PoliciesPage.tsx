@@ -3,30 +3,37 @@ export function PoliciesPage() {
     <div className="page">
       <header className="page-header">
         <span className="eyebrow">Privacidade</span>
-        <h1>Políticas</h1>
-        <p>Termos de uso e privacidade da experiência web da rádio.</p>
+        <h1>Privacidade</h1>
+        <p>Privacidade da experiência web da rádio.</p>
       </header>
 
       <section className="policy-grid">
         <article className="glass-panel policy-card">
-          <h2>Rádio e visualizador</h2>
+          <h2>Dados técnicos</h2>
           <p>
-            O áudio é reproduzido pelo stream público da rádio. O visualizador usa o áudio
-            liberado pelo navegador ou uma animação segura quando o navegador bloquear o acesso.
+            O site consulta dados públicos da transmissão, incluindo status do stream, faixa
+            atual, programação e disponibilidade da câmera, para manter a rádio atualizada.
           </p>
         </article>
         <article className="glass-panel policy-card">
-          <h2>Bate-papo</h2>
+          <h2>Preferências locais</h2>
           <p>
-            O site pode ler mensagens públicas quando o servidor responder. Mensagens digitadas
-            aqui ficam somente neste navegador e não são publicadas automaticamente.
+            Volume, equalizador e alguns ajustes de navegação podem ser guardados neste
+            navegador para melhorar a experiência sem pedir a mesma configuração toda vez.
           </p>
         </article>
         <article className="glass-panel policy-card">
-          <h2>Pedidos</h2>
+          <h2>Mensagens e pedidos</h2>
           <p>
-            Pedidos musicais são preparados para envio externo por WhatsApp. A confirmação final
-            acontece fora do site, por ação explícita do ouvinte.
+            Informações enviadas pelo ouvinte são usadas apenas para contato com a rádio,
+            organização de pedidos musicais e moderação quando necessário.
+          </p>
+        </article>
+        <article className="glass-panel policy-card">
+          <h2>Publicidade e segurança</h2>
+          <p>
+            Anúncios podem registrar exibições e cliques para controle interno. A área
+            administrativa é restrita e não expõe configurações sensíveis do sistema.
           </p>
         </article>
         <article className="glass-panel policy-card">

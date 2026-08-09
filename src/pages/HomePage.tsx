@@ -1,23 +1,32 @@
 import {
+  Activity,
   CalendarDays,
   Camera,
+  Clock3,
   ExternalLink,
+  Megaphone,
+  Menu,
   MessageCircle,
   Pause,
   Play,
   Radio,
+  RefreshCw,
   Send,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
+  UsersRound,
   Volume2,
+  X,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { AdSlot } from "../components/AdSlot";
 import { BarAudioBackdrop } from "../components/BarAudioBackdrop";
 import { BrandMantra } from "../components/BrandMantra";
 import { MarqueeText } from "../components/MarqueeText";
+import { RadioInlineAdCarousel } from "../components/RadioInlineAdCarousel";
 import { TapeRig } from "../components/TapeRig";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { fetchCamera, fetchChatMessages, fetchSchedule } from "../lib/api";
@@ -35,7 +44,8 @@ const navItems: { to: string; label: string; icon: LucideIcon }[] = [
   { to: "/bate-papo", label: "Bate-papo", icon: MessageCircle },
   { to: "/camera", label: "Câmera", icon: Camera },
   { to: "/equalizador", label: "Equalizador", icon: SlidersHorizontal },
-  { to: "/politicas", label: "Políticas", icon: ShieldCheck },
+  { to: "/politicas", label: "Privacidade", icon: ShieldCheck },
+  { to: "/ads", label: "Anúncios", icon: Megaphone },
 ];
 
 function cleanText(value: string) {
@@ -58,7 +68,7 @@ function cleanText(value: string) {
 
 function headerStatusLabel(isPlaying: boolean, isBuffering: boolean, isOnline: boolean, error: string | null) {
   if (!isPlaying && !isBuffering) return "Aguardando conexão";
-  if (error || !isOnline) return "Sem conexão";
+  if (error || !isOnline) return "Fora do ar";
   if (isBuffering) return "Aguardando conexão";
   return "AO VIVO";
 }
@@ -114,33 +124,145 @@ function currentSlotProgress(timeRange: string) {
   return Math.min(100, Math.max(4, ((now - start) / (end - start)) * 100));
 }
 
+function formatCount(value: number | null | undefined) {
+  const safeValue = Math.max(0, Number(value || 0));
+  return new Intl.NumberFormat("pt-BR").format(safeValue);
+}
+
+function scheduleWindowMinutes(timeRange: string) {
+  const matches = timeRange.match(/\d{1,2}:\d{2}/g);
+  if (!matches || matches.length < 2) return null;
+
+  const start = timeToMinutes(matches[0]);
+  let end = timeToMinutes(matches[1]);
+  if (end <= start) end += 24 * 60;
+
+  return {
+    start,
+    end,
+    duration: Math.max(1, end - start),
+  };
+}
+
+function scheduleDurationLabel(timeRange: string) {
+  const window = scheduleWindowMinutes(timeRange);
+  if (!window) return "";
+  const hours = Math.floor(window.duration / 60);
+  const minutes = window.duration % 60;
+  if (!hours) return `${minutes}min`;
+  if (!minutes) return `${hours}h`;
+  return `${hours}h ${minutes}min`;
+}
+
+function findNextScheduleSlot(slots: ScheduleDay["slots"]) {
+  if (!slots.length) return null;
+  const now = new Date().getHours() * 60 + new Date().getMinutes();
+  const future = slots
+    .filter((slot) => !slot.isNow)
+    .map((slot) => ({ slot, window: scheduleWindowMinutes(slot.time) }))
+    .filter((item): item is { slot: ScheduleDay["slots"][number]; window: NonNullable<ReturnType<typeof scheduleWindowMinutes>> } =>
+      Boolean(item.window && item.window.start > now),
+    )
+    .sort((a, b) => a.window.start - b.window.start);
+
+  return future[0]?.slot ?? slots.find((slot) => !slot.isNow) ?? null;
+}
+
 export const SiteLayout = memo(function SiteLayout() {
   const { isPlaying, isBuffering, error, nowPlaying } = usePlayer();
+  const location = useLocation();
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const isOnline = nowPlaying.stats.isOnline !== false;
   const status = headerStatusLabel(isPlaying, isBuffering, isOnline, error);
+  const statusClassName = status === "AO VIVO" ? "header-status is-on" : status === "Fora do ar" ? "header-status is-off" : "header-status is-waiting";
+  const onlineCount = formatCount(nowPlaying.stats.listeners);
+  const visitorCount = formatCount(nowPlaying.stats.streamHits || nowPlaying.stats.peakListeners);
+  const closeMobileMenu = useCallback(() => setIsMobileMenuOpen(false), []);
+  const toggleMobileMenu = useCallback(() => setIsMobileMenuOpen((current) => !current), []);
+
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!isMobileMenuOpen) return undefined;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsMobileMenuOpen(false);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isMobileMenuOpen]);
 
   const navLinks = useMemo(() => navItems.map((item) => {
     const Icon = item.icon;
     return (
-      <NavLink key={item.to} to={item.to} title={item.label}>
+      <NavLink key={item.to} to={item.to} title={item.label} onClick={closeMobileMenu}>
         <Icon size={16} aria-hidden="true" />
         <span>{item.label}</span>
       </NavLink>
     );
-  }), []);
+  }), [closeMobileMenu]);
 
   return (
     <div className="station-site">
       <header className="site-header site-header-clean">
         <div className="header-actions">
-          <span className={status === "AO VIVO" ? "header-status is-on" : status === "Sem conexão" ? "header-status is-off" : "header-status"}>
-            <strong>{status}</strong>
-          </span>
-          <nav aria-label="Navegação principal">
+          <div className="header-live-cluster">
+            <button
+              className="mobile-menu-button"
+              type="button"
+              aria-controls="mobile-nav-drawer"
+              aria-expanded={isMobileMenuOpen}
+              aria-label={isMobileMenuOpen ? "Fechar menu" : "Abrir menu"}
+              onClick={toggleMobileMenu}
+            >
+              <Menu size={20} aria-hidden="true" />
+            </button>
+            <span className={statusClassName}>
+              <strong>{status}</strong>
+            </span>
+            <span className="header-metric header-metric-online" title="Ouvintes online">
+              <UsersRound size={14} />
+              <small>Online</small>
+              <strong>{onlineCount}</strong>
+            </span>
+            <span className="header-metric header-metric-visitors" title="Visitantes do stream">
+              <Activity size={14} />
+              <small>Visitantes</small>
+              <strong>{visitorCount}</strong>
+            </span>
+          </div>
+          <nav className="desktop-nav" aria-label="Navegação principal">
             {navLinks}
           </nav>
         </div>
       </header>
+      <button
+        className={isMobileMenuOpen ? "mobile-nav-scrim is-open" : "mobile-nav-scrim"}
+        type="button"
+        aria-label="Fechar menu"
+        tabIndex={isMobileMenuOpen ? 0 : -1}
+        onClick={closeMobileMenu}
+      />
+      <aside
+        id="mobile-nav-drawer"
+        className={isMobileMenuOpen ? "mobile-nav-drawer is-open" : "mobile-nav-drawer"}
+        aria-hidden={!isMobileMenuOpen}
+      >
+        <div className="mobile-drawer-head">
+          <div>
+            <strong>Menu da Rádio</strong>
+          </div>
+          <button type="button" aria-label="Fechar menu" onClick={closeMobileMenu}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <nav className="mobile-drawer-nav" aria-label="Navegação mobile">
+          {navLinks}
+        </nav>
+      </aside>
       <Outlet />
     </div>
   );
@@ -167,64 +289,69 @@ export const RadioHomePage = memo(function RadioHomePage() {
       <section className="radio-hero">
         <BarAudioBackdrop analyser={analyser} isPlaying={isPlaying} />
         <div className="radio-hero-grid">
-          <div className="radio-copy-card">
-            <div className={isPlaying ? "brand-identity-flow is-playing" : "brand-identity-flow"}>
-              <h1 className="station-title">
-                <span className="station-kicker">Web Rádio</span>
-                <span className="station-word">Conexão</span>
-                <span className="station-word">Jamaica</span>
-              </h1>
-              <BrandMantra className={isPlaying ? "hero-mantra is-playing" : "hero-mantra"} />
-            </div>
-
-            <div className="track-line">
-              <img
-                src={cover}
-                alt=""
-                loading="eager"
-                decoding="async"
-                fetchPriority="high"
-                draggable={false}
-                onError={(event) => {
-                  event.currentTarget.src = DEFAULT_COVER;
-                }}
-              />
-              <div>
-                <MarqueeText as="strong" text={trackTitle} />
-                <span>{trackArtist}</span>
+          <div className="radio-copy-stack">
+            <div className="radio-copy-card">
+              <div className={isPlaying ? "brand-identity-flow is-playing" : "brand-identity-flow"}>
+                <h1 className="station-title">
+                  <span className="station-kicker">Web Rádio</span>
+                  <span className="station-word">Conexão</span>
+                  <span className="station-word">Jamaica</span>
+                </h1>
+                <BrandMantra className={isPlaying ? "hero-mantra is-playing" : "hero-mantra"} />
               </div>
+
+              <div className="track-line">
+                <img
+                  src={cover}
+                  alt=""
+                  loading="eager"
+                  decoding="async"
+                  draggable={false}
+                  onError={(event) => {
+                    event.currentTarget.src = DEFAULT_COVER;
+                  }}
+                />
+                <div>
+                  <MarqueeText as="strong" text={trackTitle} />
+                  <span>{trackArtist}</span>
+                </div>
+              </div>
+
+              <div className="hero-actions">
+                <button
+                  className="play-main"
+                  type="button"
+                  aria-label={isPlaying ? "Pausar rádio" : "Tocar rádio"}
+                  onClick={() => void toggle()}
+                >
+                  {isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}
+                  <span>{isPlaying ? "Pausar rádio" : "Tocar rádio"}</span>
+                </button>
+                <button className="icon-glass radio-tool-button" type="button" onClick={() => void refreshNowPlaying()} aria-label="Atualizar faixa">
+                  <RefreshCw size={18} />
+                </button>
+                <label className="volume-line">
+                  <Volume2 size={18} />
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={volume}
+                    onChange={(event) => setVolume(Number(event.currentTarget.value))}
+                  />
+                </label>
+              </div>
+
+              {error ? <p className="friendly-error">{error}</p> : null}
             </div>
 
-            <div className="hero-actions">
-              <button className="play-main" type="button" onClick={() => void toggle()}>
-                {isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}
-                {isPlaying ? "Pausar rádio" : "Tocar rádio"}
-              </button>
-              <button className="ghost-button" type="button" onClick={() => void refreshNowPlaying()}>
-                Atualizar faixa
-              </button>
-            </div>
-
-            <label className="volume-line">
-              <Volume2 size={18} />
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={volume}
-                onChange={(event) => setVolume(Number(event.currentTarget.value))}
-              />
-            </label>
-            {error ? <p className="friendly-error">{error}</p> : null}
+            <RadioInlineAdCarousel />
           </div>
 
           <div className="radio-visual-card">
             <TapeRig isPlaying={isPlaying || isBuffering} />
           </div>
-        </div>
-        <div className="hero-ad">
-          <AdSlot compact />
         </div>
       </section>
     </main>
@@ -264,13 +391,42 @@ export function ScheduleStationPage() {
     [days, defaultDay, selectedDayId],
   );
   const selectedCurrentSlot = selectedDay?.slots.find((slot) => slot.isNow);
-  const scheduleProgress = selectedCurrentSlot ? currentSlotProgress(selectedCurrentSlot.time) : 0;
+  const globalCurrentSlot = useMemo(() => days.flatMap((day) => day.slots).find((slot) => slot.isNow), [days]);
+  const currentSlot = selectedCurrentSlot ?? globalCurrentSlot;
+  const nextSlot = selectedDay ? findNextScheduleSlot(selectedDay.slots) : null;
+  const scheduleProgress = currentSlot ? currentSlotProgress(currentSlot.time) : 0;
+  const liveCount = selectedDay?.slots.filter((slot) => slot.isNow).length ?? 0;
 
   return (
     <PageShell title="Programação">
       <section className="program-board">
         {days.length && selectedDay ? (
           <>
+            {currentSlot ? (
+              <article className="program-live-panel">
+                <span className="program-live-icon"><Radio size={22} /></span>
+                <div>
+                  <small>Agora mesmo</small>
+                  <h2>{cleanText(currentSlot.program)}</h2>
+                  <p>{currentSlot.time} · {cleanText(currentSlot.host || STATION_NAME)}</p>
+                  <div className="program-now-progress is-live">
+                    <span style={{ width: `${scheduleProgress}%` }} />
+                  </div>
+                </div>
+              </article>
+            ) : null}
+
+            {nextSlot ? (
+              <article className="program-next-panel">
+                <Clock3 size={18} />
+                <div>
+                  <small>Próximo horário</small>
+                  <strong>{nextSlot.time} · {cleanText(nextSlot.program)}</strong>
+                </div>
+                <span>{scheduleDurationLabel(nextSlot.time) || "em breve"}</span>
+              </article>
+            ) : null}
+
             <div className="program-tabs" role="tablist" aria-label="Dias da semana">
               {days.map((day) => {
                 const isToday = isTodayScheduleDay(day);
@@ -283,6 +439,7 @@ export function ScheduleStationPage() {
                     type="button"
                     aria-selected={day.id === selectedDay.id}
                   >
+                    <Sparkles size={14} aria-hidden="true" />
                     {isToday ? <span>Hoje</span> : null}
                     {day.label}
                   </button>
@@ -292,16 +449,39 @@ export function ScheduleStationPage() {
 
             <article className="program-day-panel">
               <div className="program-card-head">
-                <h2>{selectedDay.label}</h2>
+                <div>
+                  <span>Grade do dia</span>
+                  <h2>{selectedDay.label}</h2>
+                </div>
+                <div className="program-metrics">
+                  <span>
+                    <CalendarDays size={16} />
+                    <small>Programas</small>
+                    <strong>{selectedDay.slots.length}</strong>
+                  </span>
+                  <span>
+                    <Radio size={16} />
+                    <small>No ar</small>
+                    <strong>{liveCount || "--"}</strong>
+                  </span>
+                  <span>
+                    <Clock3 size={16} />
+                    <small>Próximo</small>
+                    <strong>{nextSlot?.time.split("-")[0].trim() || "--"}</strong>
+                  </span>
+                </div>
               </div>
 
               <div className="program-slots full-list">
                 {selectedDay.slots.map((slot) => (
                   <p className={slot.isNow ? "is-now" : ""} key={slot.id}>
-                    <strong>{slot.time}</strong>
+                    <strong><Clock3 size={14} /> {slot.time}</strong>
                     <span>{cleanText(slot.program)}</span>
-                    {slot.host ? <em>{cleanText(slot.host)}</em> : null}
-                    {slot.isNow ? <small>No ar agora</small> : null}
+                    <em>{cleanText(slot.host || STATION_NAME)}</em>
+                    <small>{slot.isNow ? "No ar agora" : scheduleDurationLabel(slot.time)}</small>
+                    {slot.isNow ? (
+                      <b className="program-row-progress" style={{ width: `${currentSlotProgress(slot.time)}%` }} />
+                    ) : null}
                   </p>
                 ))}
               </div>
@@ -373,14 +553,25 @@ export function ChatStationPage() {
   const [localMessages, setLocalMessages] = useState<{ id: string; author: string; text: string }[]>([]);
   const messages = [...localMessages, ...(data?.messages.slice(0, 10) ?? [])];
 
-  const submit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!text.trim()) return;
+  const submitMessage = useCallback(() => {
+    const nextText = text.trim();
+    if (!nextText) return;
     setLocalMessages((current) => [
-      { id: crypto.randomUUID(), author: name.trim() || "Ouvinte", text: text.trim() },
+      { id: crypto.randomUUID(), author: name.trim() || "Ouvinte", text: nextText },
       ...current,
     ].slice(0, 10));
     setText("");
+  }, [name, text]);
+
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    submitMessage();
+  };
+
+  const submitOnEnter = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    submitMessage();
   };
 
   return (
@@ -403,7 +594,7 @@ export function ChatStationPage() {
         </div>
         <form className="chat-mini-form" onSubmit={submit}>
           <input value={name} onChange={(event) => setName(event.currentTarget.value)} aria-label="Nome no bate-papo" />
-          <input value={text} onChange={(event) => setText(event.currentTarget.value)} placeholder="Mensagem" />
+          <input value={text} onChange={(event) => setText(event.currentTarget.value)} onKeyDown={submitOnEnter} placeholder="Mensagem" />
           <button type="submit" aria-label="Adicionar mensagem local"><Send size={16} /></button>
         </form>
       </section>
@@ -468,37 +659,37 @@ export function EqualizerStationPage() {
 
 export function PoliciesStationPage() {
   return (
-    <PageShell title="Uso e privacidade">
+    <PageShell title="Privacidade">
       <section className="policy-panel policy-panel-strong">
         <article>
           <ShieldCheck size={22} />
-          <h2>Rádio ao vivo</h2>
-          <p>O player usa o stream público da Web Rádio Conexão Jamaica para entregar a transmissão da rádio.</p>
+          <h2>Dados técnicos</h2>
+          <p>O site consulta informações públicas da transmissão, como status do stream, faixa atual, agenda e disponibilidade da câmera, para manter a experiência atualizada.</p>
+        </article>
+        <article>
+          <Radio size={22} />
+          <h2>Preferências</h2>
+          <p>Volume, equalizador e ajustes de uso podem ficar salvos neste navegador para evitar que o ouvinte precise configurar tudo novamente.</p>
         </article>
         <article>
           <MessageCircle size={22} />
           <h2>Bate-papo e pedidos</h2>
-          <p>Mensagens locais não são publicadas automaticamente. Pedidos abrem confirmação externa antes do envio.</p>
+          <p>Campos enviados pelo ouvinte são usados apenas para comunicação com a rádio, moderação e organização dos pedidos musicais.</p>
         </article>
         <article>
           <CalendarDays size={22} />
-          <h2>Anúncios</h2>
-          <p>Campanhas aparecem no espaço reservado do site, uma de cada vez, sem cobrir o conteúdo principal.</p>
+          <h2>Publicidade</h2>
+          <p>Anúncios cadastrados pelos administradores podem registrar exibições e cliques para controle interno das campanhas.</p>
         </article>
         <article>
-          <Radio size={22} />
-          <h2>Privacidade</h2>
-          <p>As preferências locais do player e do equalizador ficam neste navegador para melhorar a experiência.</p>
+          <Camera size={22} />
+          <h2>Segurança</h2>
+          <p>A área administrativa é restrita. Configurações sensíveis, credenciais e detalhes internos de infraestrutura não são exibidos publicamente.</p>
         </article>
         <article>
           <Send size={22} />
           <h2>Contato</h2>
-          <p>Para pedidos, apoio cultural ou informações da rádio, use os canais oficiais da Web Rádio Conexão Jamaica.</p>
-        </article>
-        <article>
-          <Camera size={22} />
-          <h2>Conteúdo ao vivo</h2>
-          <p>Recursos como câmera, agenda e faixa atual podem variar conforme a disponibilidade da transmissão.</p>
+          <p>Para dúvidas sobre privacidade, remoção de conteúdo ou apoio cultural, use os canais oficiais da Web Rádio Conexão Jamaica.</p>
         </article>
       </section>
     </PageShell>

@@ -32,7 +32,9 @@ export default function App() {
             <Route path="/pedidos" element={<RequestsStationPage />} />
             <Route path="/bate-papo" element={<ChatStationPage />} />
             <Route path="/camera" element={<CameraStationPage />} />
+            <Route path="/ao-vivo" element={<CameraStationPage />} />
             <Route path="/equalizador" element={<EqualizerStationPage />} />
+            <Route path="/ajustes" element={<EqualizerStationPage />} />
             <Route path="/politicas" element={<PoliciesStationPage />} />
           </Route>
           <Route

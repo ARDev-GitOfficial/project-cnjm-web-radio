@@ -1,5 +1,8 @@
 node_modules/
 dist/
+.netlify/
+.vite/
+coverage/
 *.log
 *.tsbuildinfo
 vite.config.js

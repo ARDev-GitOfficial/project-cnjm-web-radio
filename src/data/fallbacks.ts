@@ -19,6 +19,8 @@ export const fallbackNowPlaying = (): NowPlayingResponse => ({
   stats: {
     listeners: 0,
     peakListeners: 0,
+    uniqueListeners: 0,
+    streamHits: 0,
     genre: "Reggae",
     bitrate: "128",
     isOnline: true,

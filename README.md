@@ -6,7 +6,7 @@ Site React/Vite da Web Rádio Conexão Jamaica, pronto para deploy estático com
 
 Use a pasta `site` como base do projeto.
 
-- Build command: `pnpm install --frozen-lockfile && pnpm run build`
+- Build command: `pnpm run build`
 - Publish directory: `dist`
 - Functions directory: `netlify/functions`
 
@@ -19,7 +19,18 @@ O arquivo `netlify.toml` já configura essas opções e também:
 
 Se preencher o comando manualmente no painel do Netlify, use o mesmo comando do `netlify.toml`:
 
-`pnpm install --frozen-lockfile && pnpm run build`
+`pnpm run build`
+
+## Anúncios globais
+
+O painel `/ads` só salva para todos os visitantes quando o deploy usa Netlify Functions, Netlify Database e Netlify Blobs. Em `localhost`, ele pode cair em modo local apenas para teste.
+
+No Netlify, confirme:
+
+- os plugins antigos de AMP/feed/imagem estão removidos;
+- Netlify Database está ativo no projeto;
+- as migrações em `netlify/database/migrations` foram enviadas;
+- as variáveis de admin foram configuradas no painel do site.
 
 ## Upload
 

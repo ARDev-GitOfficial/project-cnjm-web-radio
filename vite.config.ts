@@ -17,6 +17,8 @@ type ResponseLike = {
 type StatsPayload = {
   currentlisteners?: number;
   peaklisteners?: number;
+  uniquelisteners?: number;
+  streamhits?: number;
   servergenre?: string;
   songtitle?: string;
   streamstatus?: number;
@@ -373,6 +375,8 @@ async function handleNowPlaying(res: ResponseLike) {
       stats: {
         listeners: Number(stats.currentlisteners ?? 0),
         peakListeners: Number(stats.peaklisteners ?? 0),
+        uniqueListeners: Number(stats.uniquelisteners ?? 0),
+        streamHits: Number(stats.streamhits ?? 0),
         genre: stats.servergenre ?? "Reggae",
         bitrate: stats.bitrate ?? "128",
         isOnline: Number(stats.streamstatus ?? 0) === 1,
@@ -392,6 +396,8 @@ async function handleNowPlaying(res: ResponseLike) {
       stats: {
         listeners: 0,
         peakListeners: 0,
+        uniqueListeners: 0,
+        streamHits: 0,
         genre: "Reggae",
         bitrate: "128",
         isOnline: true,
@@ -491,6 +497,35 @@ function installApi(server: ViteDevServer | PreviewServer) {
     }
     if (pathname === "/api/chat/messages") {
       void handleChatMessages(res);
+      return;
+    }
+    if (pathname === "/api/ads") {
+      json(res, 200, {
+        ok: false,
+        source: "fallback",
+        ads: [],
+        settings: {
+          enabled: true,
+          scheduleEnabled: false,
+          startTime: "08:00",
+          endTime: "22:00",
+        },
+        fetchedAt: new Date().toISOString(),
+        message: "API de anúncios disponível apenas no Netlify Functions.",
+      });
+      return;
+    }
+    if (pathname === "/api/ads/login") {
+      json(res, 200, {
+        ok: false,
+        message: "Login remoto disponível apenas no Netlify Functions.",
+      });
+      return;
+    }
+    if (/^\/api\/ads\/[^/]+\/stats$/.test(pathname)) {
+      json(res, 200, {
+        ok: true,
+      });
       return;
     }
 

@@ -1,81 +1,27 @@
 import { Megaphone } from "lucide-react";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
+import { usePublicAds } from "../hooks/usePublicAds";
 import {
-  getVisibleAds,
-  loadAdSettings,
-  loadAds,
-  updateAdStats,
+  AD_BANNER_HEIGHT,
+  AD_BANNER_WIDTH,
+  optimizedAdImageUrl,
+  sendAdStat,
   type SiteAd,
 } from "../lib/ads";
 
-function readPublicAds() {
-  return getVisibleAds(loadAds(), loadAdSettings());
-}
-
-function publicAdSignature(ads: SiteAd[]) {
-  return ads
-    .map((ad) =>
-      [
-        ad.id,
-        ad.title,
-        ad.description,
-        ad.imageUrl,
-        ad.linkUrl,
-        ad.buttonLabel,
-        ad.section,
-        ad.active ? "1" : "0",
-      ].join("\u001f"),
-    )
-    .join("\u001e");
-}
-
-function usePublicAds() {
-  const [ads, setAds] = useState<SiteAd[]>(readPublicAds);
-  const signatureRef = useRef("");
-
-  useEffect(() => {
-    signatureRef.current = publicAdSignature(ads);
-
-    const reload = () => {
-      const nextAds = readPublicAds();
-      const nextSignature = publicAdSignature(nextAds);
-      if (nextSignature === signatureRef.current) return;
-
-      signatureRef.current = nextSignature;
-      setAds(nextAds);
-    };
-
-    const reloadWhenVisible = () => {
-      if (!document.hidden) reload();
-    };
-    reload();
-    window.addEventListener("storage", reload);
-    window.addEventListener("cnjm-ads-updated", reload);
-    document.addEventListener("visibilitychange", reloadWhenVisible);
-    const timer = window.setInterval(reloadWhenVisible, 60_000);
-    return () => {
-      window.removeEventListener("storage", reload);
-      window.removeEventListener("cnjm-ads-updated", reload);
-      document.removeEventListener("visibilitychange", reloadWhenVisible);
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  return ads;
-}
-
 export function AdSlot({ compact = false }: { compact?: boolean }) {
-  const ads = usePublicAds();
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pauseRef = useRef(false);
   const directionRef = useRef(1);
   const impressionsRef = useRef(new Set<string>());
+  const selectDisplayAds = useCallback((ad: SiteAd) => ad.placement !== "sponsor", []);
+  const { ads } = usePublicAds(selectDisplayAds);
 
   useEffect(() => {
     for (const ad of ads) {
       if (impressionsRef.current.has(ad.id)) continue;
       impressionsRef.current.add(ad.id);
-      updateAdStats(ad.id, "impressions");
+      void sendAdStat(ad.id, "impressions");
     }
   }, [ads]);
 
@@ -160,24 +106,35 @@ export function AdSlot({ compact = false }: { compact?: boolean }) {
         }}
       >
         {ads.map((ad) => (
-          <AdCard key={ad.id} ad={ad} />
+          <AdCard key={ad.id} ad={ad} compact={compact} />
         ))}
       </div>
     </aside>
   );
 }
 
-const AdCard = memo(function AdCard({ ad }: { ad: SiteAd }) {
+const AdCard = memo(function AdCard({ ad, compact }: { ad: SiteAd; compact: boolean }) {
+  const imageWidth = compact ? 760 : AD_BANNER_WIDTH;
+  const imageHeight = compact ? 202 : AD_BANNER_HEIGHT;
   const content = (
     <>
       {ad.imageUrl ? (
-        <img src={ad.imageUrl} alt="" loading="lazy" decoding="async" draggable={false} />
+        <img
+          className="ad-banner-image"
+          src={optimizedAdImageUrl(ad.imageUrl, imageWidth, imageHeight)}
+          alt={ad.title || "Anúncio publicitário"}
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+        />
       ) : (
-        <span className="ad-mark"><Megaphone size={22} /></span>
+        <span className="ad-mark">
+          <Megaphone size={22} />
+        </span>
       )}
-      <div>
+      <div className="ad-copy">
         <span>Publicidade</span>
-        <strong>{ad.title}</strong>
+        <strong>{ad.title || "Anuncie aqui"}</strong>
         <p>{ad.description || "Apoio cultural da Web Rádio Conexão Jamaica."}</p>
         {ad.linkUrl ? <small>{ad.buttonLabel || "Abrir anúncio"}</small> : null}
       </div>
@@ -191,7 +148,9 @@ const AdCard = memo(function AdCard({ ad }: { ad: SiteAd }) {
         href={ad.linkUrl}
         target="_blank"
         rel="noreferrer"
-        onClick={() => updateAdStats(ad.id, "clicks")}
+        onClick={() => {
+          void sendAdStat(ad.id, "clicks");
+        }}
       >
         {content}
       </a>

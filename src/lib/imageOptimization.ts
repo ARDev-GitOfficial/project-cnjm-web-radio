@@ -40,6 +40,6 @@ export function installOptimizedBackgroundImages() {
   );
   root.style.setProperty(
     "--mobile-background-image",
-    `url("${optimizedStaticImageUrl("/assets/glass-ref-background-app.png", { width: 920, quality: 74 })}")`,
+    `url("${optimizedStaticImageUrl("/assets/glass_ref_background.png", { width: 920, quality: 74 })}")`,
   );
 }

@@ -46,7 +46,7 @@
   --brand-flow-size: 360px 100%;
   --shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
   --desktop-background-image: url("/assets/cnjmradio-total-background.png");
-  --mobile-background-image: url("/assets/glass-ref-background-app.png");
+  --mobile-background-image: url("/assets/glass_ref_background.png");
   --background-image: var(--desktop-background-image);
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
@@ -3482,8 +3482,15 @@ select:focus {
 
 @media (max-width: 980px) {
   :root {
+    --background-image: var(--mobile-background-image);
     --glass-blur: blur(6px);
     --glass-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  body,
+  .ads-admin-page {
+    background-attachment: scroll;
+    background-position: top center;
   }
 
   .site-header {
@@ -3718,6 +3725,12 @@ select:focus {
 
   .ad-slot.is-compact .ad-carousel-card p {
     display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  :root {
+    --background-image: var(--mobile-background-image);
   }
 }
 

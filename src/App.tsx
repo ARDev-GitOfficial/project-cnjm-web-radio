@@ -119,6 +119,24 @@ function RouteFallback() {
   );
 }
 
+function PageVisibilityPerformanceSync() {
+  useEffect(() => {
+    const updateVisibilityState = () => {
+      document.documentElement.classList.toggle("site-suspended", document.hidden);
+    };
+
+    updateVisibilityState();
+    document.addEventListener("visibilitychange", updateVisibilityState);
+
+    return () => {
+      document.documentElement.classList.remove("site-suspended");
+      document.removeEventListener("visibilitychange", updateVisibilityState);
+    };
+  }, []);
+
+  return null;
+}
+
 export default function App() {
   useEffect(() => {
     installOptimizedBackgroundImages();
@@ -128,6 +146,7 @@ export default function App() {
     <PlayerProvider>
       <BrowserRouter>
         <SeoSync />
+        <PageVisibilityPerformanceSync />
         <Routes>
           <Route element={<SiteLayout />}>
             <Route index element={<RadioHomePage />} />

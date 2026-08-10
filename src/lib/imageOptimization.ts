@@ -35,7 +35,7 @@ export function installOptimizedBackgroundImages() {
 
   const root = document.documentElement;
   root.style.setProperty(
-    "--background-image",
+    "--desktop-background-image",
     `url("${optimizedStaticImageUrl("/assets/cnjmradio-total-background.png", { width: 1600, quality: 76 })}")`,
   );
   root.style.setProperty(

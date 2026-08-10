@@ -35,7 +35,6 @@
   --glass-blur: blur(16px) saturate(1.24);
   --glass-shadow:
     0 18px 54px rgba(0, 0, 0, 0.28),
-    0 0 30px rgba(47, 232, 138, 0.055),
     inset 0 1px 0 rgba(255, 255, 255, 0.16);
   --brand-flow-gradient: linear-gradient(
     90deg,
@@ -46,8 +45,9 @@
   );
   --brand-flow-size: 360px 100%;
   --shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-  --background-image: url("/assets/cnjmradio-total-background.png");
+  --desktop-background-image: url("/assets/cnjmradio-total-background.png");
   --mobile-background-image: url("/assets/glass-ref-background-app.png");
+  --background-image: var(--desktop-background-image);
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
@@ -105,6 +105,13 @@ img,
 canvas {
   display: block;
   max-width: 100%;
+}
+
+html.site-suspended *,
+html.site-suspended *::before,
+html.site-suspended *::after {
+  animation-play-state: paused !important;
+  transition-duration: 0ms !important;
 }
 
 input,
@@ -186,16 +193,8 @@ select:focus {
 }
 
 .site-header::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    radial-gradient(circle at 18% 50%, rgba(47, 232, 138, 0.08), transparent 26%),
-    radial-gradient(circle at 74% 50%, rgba(243, 203, 79, 0.07), transparent 32%);
-  opacity: 0.16;
-  transform: translateX(-34%);
-  animation: header-glow 12000ms ease-in-out infinite;
-  content: "";
+  display: none;
+  content: none;
 }
 
 .brand-lockup {
@@ -1224,6 +1223,16 @@ select:focus {
   accent-color: var(--green);
 }
 
+.volume-line input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
 .friendly-error,
 .form-warning {
   margin: 0;
@@ -1240,31 +1249,12 @@ select:focus {
 
 .tape-rig {
   --rig-size: clamp(360px, 52.8vw, 768px);
-  --rig-beat: 0.14;
   position: relative;
   isolation: isolate;
   width: min(var(--rig-size), calc(120% + 0px), calc(100vw - 24px), calc(100svh - 24px));
   max-width: min(calc(100vw - 24px), calc(100svh - 24px));
   aspect-ratio: 1;
-  filter: drop-shadow(0 34px 84px rgba(0, 0, 0, 0.62));
-}
-
-.rig-backlight {
-  position: absolute;
-  inset: -5% -12% -1%;
-  z-index: 0;
-  border-radius: 42% 42% 34% 34%;
-  background:
-    radial-gradient(ellipse at 50% 58%, rgba(2, 6, 3, 0.86) 0 42%, rgba(2, 6, 3, 0.5) 56%, transparent 74%),
-    radial-gradient(ellipse at 50% 60%, rgba(47, 232, 138, calc(0.18 + var(--rig-beat) * 0.28)), transparent 63%),
-    radial-gradient(ellipse at 50% 45%, rgba(243, 203, 79, calc(0.12 + var(--rig-beat) * 0.22)), transparent 58%);
-  filter: blur(24px);
-  opacity: calc(0.48 + var(--rig-beat) * 0.24);
-  pointer-events: none;
-  transform: scale(calc(0.98 + var(--rig-beat) * 0.08));
-  transition:
-    opacity 120ms linear,
-    transform 120ms linear;
+  filter: drop-shadow(0 24px 58px rgba(0, 0, 0, 0.58));
 }
 
 .rig-vinyl {
@@ -3362,99 +3352,6 @@ select:focus {
   }
 }
 
-@keyframes cassette-glow {
-  0%,
-  100% {
-    filter:
-      saturate(1.03)
-      contrast(1.04)
-      drop-shadow(0 10px 22px rgba(0, 0, 0, 0.42));
-  }
-
-  50% {
-    filter:
-      saturate(1.06)
-      contrast(1.06)
-      drop-shadow(0 12px 28px rgba(243, 203, 79, 0.14))
-      drop-shadow(0 6px 18px rgba(255, 247, 201, 0.08));
-  }
-}
-
-@keyframes tape-backlight-breathe {
-  0%,
-  100% {
-    opacity: 0.34;
-    transform: translateY(2%) scale(0.96);
-  }
-
-  45% {
-    opacity: 0.62;
-    transform: translateY(-1%) scale(1.04);
-  }
-
-  70% {
-    opacity: 0.48;
-    transform: translateY(1%) scale(1.01);
-  }
-}
-
-@keyframes tape-light-sweep {
-  0%,
-  100% {
-    opacity: 0.14;
-    transform: translateX(-14%) skewX(-8deg);
-  }
-
-  48% {
-    opacity: 0.42;
-    transform: translateX(12%) skewX(-8deg);
-  }
-
-  72% {
-    opacity: 0.22;
-    transform: translateX(4%) skewX(-8deg);
-  }
-}
-
-@keyframes rig-backlight-soft {
-  0%,
-  100% {
-    opacity: 0.42;
-    transform: scale(0.98) translate(-1%, 1%);
-  }
-
-  50% {
-    opacity: 0.62;
-    transform: scale(1.04) translate(1%, -1%);
-  }
-}
-
-@keyframes rig-ambient-sweep {
-  0%,
-  100% {
-    opacity: 0.24;
-    transform: rotate(0deg) scale(1);
-  }
-
-  50% {
-    opacity: 0.38;
-    transform: rotate(180deg) scale(1.05);
-  }
-}
-
-@keyframes header-glow {
-  0%,
-  100% {
-    opacity: 0.12;
-    transform: scale(1) translateX(0);
-  }
-
-  50% {
-    opacity: 0.22;
-    transform: scale(1.03) translateX(0);
-  }
-}
-
 @keyframes glass-border-breathe {
   0%,
   100% {
@@ -3565,7 +3462,6 @@ select:focus {
     animation-iteration-count: infinite !important;
   }
 
-  .site-header::before,
   .tape-rig.is-playing .rig-vinyl {
     animation: rig-vinyl-spin-left 28s linear infinite !important;
   }

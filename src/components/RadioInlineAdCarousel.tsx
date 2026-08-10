@@ -97,6 +97,7 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
     if (radioAds.length <= 1) return undefined;
 
     const interval = window.setInterval(() => {
+      if (document.hidden) return;
       if (Date.now() < pauseUntilRef.current) return;
       setActiveIndex((current) => (current + 1) % radioAds.length);
     }, AUTO_ROTATE_MS);

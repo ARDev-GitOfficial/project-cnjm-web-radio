@@ -29,6 +29,7 @@ type PlayerContextValue = {
   toggle: () => Promise<void>;
   play: () => Promise<void>;
   pause: () => void;
+  reconnect: () => Promise<void>;
   refreshNowPlaying: () => Promise<void>;
 };
 
@@ -216,6 +217,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setIsBuffering(false);
   }, []);
 
+  const reconnect = useCallback(async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    setError(null);
+    setIsBuffering(true);
+
+    try {
+      audio.pause();
+      audio.src = STREAM_URL;
+      audio.load();
+      await setupAnalyser();
+      await audio.play();
+      setIsPlaying(true);
+      void refreshNowPlaying();
+    } catch {
+      setIsPlaying(false);
+      setIsBuffering(false);
+      setError("Não foi possível reconectar a transmissão agora.");
+    }
+  }, [refreshNowPlaying, setupAnalyser]);
+
   const toggle = useCallback(async () => {
     if (isPlaying) {
       pause();
@@ -263,6 +286,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       toggle,
       play,
       pause,
+      reconnect,
       refreshNowPlaying,
     }),
     [
@@ -273,6 +297,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       nowPlaying,
       pause,
       play,
+      reconnect,
       applyEqPreset,
       eqBands,
       refreshNowPlaying,

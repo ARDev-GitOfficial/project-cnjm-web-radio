@@ -283,7 +283,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
     toggle,
     volume,
     setVolume,
-    refreshNowPlaying,
+    reconnect,
   } = usePlayer();
   const scheduleLoader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
   const { data: scheduleData } = useAsyncData(scheduleLoader, [], 60000);
@@ -338,7 +338,13 @@ export const RadioHomePage = memo(function RadioHomePage() {
                   {isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}
                   <span>{isPlaying ? "Pausar rádio" : "Tocar rádio"}</span>
                 </button>
-                <button className="icon-glass radio-tool-button" type="button" onClick={() => void refreshNowPlaying()} aria-label="Atualizar faixa">
+                <button
+                  className="icon-glass radio-tool-button"
+                  type="button"
+                  onClick={() => void reconnect()}
+                  aria-label="Reconectar rádio"
+                  title="Reconectar rádio"
+                >
                   <RefreshCw size={18} />
                 </button>
                 <label className="volume-line">
@@ -347,7 +353,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
                     type="range"
                     min="0"
                     max="1"
-                    step="0.01"
+                    step="0.001"
                     value={volume}
                     onChange={(event) => setVolume(Number(event.currentTarget.value))}
                   />
@@ -361,7 +367,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
           </div>
 
           <div className="radio-visual-card">
-            <TapeRig analyser={analyser} isPlaying={isPlaying || isBuffering} />
+            <TapeRig isPlaying={isPlaying || isBuffering} />
           </div>
         </div>
       </section>

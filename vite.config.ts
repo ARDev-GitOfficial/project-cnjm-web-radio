@@ -3,7 +3,7 @@ import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } fro
 
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
-const TIMETABLE_URL = "https://radioconexcaojamaica.com.br/timetable";
+const PUBLIC_SCHEDULE_URL = "https://webradioconexaojamaica.com/api/schedule";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
 const COVER_URL = "https://player.svrdedicado.org/one-page/7586/cover";
 const CHAT_MESSAGES_URL = "https://player.svrdedicado.org/chat/7586/lista?limit=80";
@@ -412,16 +412,9 @@ async function handleNowPlaying(res: ResponseLike) {
 
 async function handleSchedule(res: ResponseLike) {
   try {
-    const html = await fetchText(TIMETABLE_URL);
-    const days = parseSchedule(html).filter((day) => day.slots.length > 0);
-    if (days.length === 0) throw new Error("Grade vazia.");
+    const payload = await fetchJson<unknown>(PUBLIC_SCHEDULE_URL);
 
-    json(res, 200, {
-      ok: true,
-      source: "live",
-      days,
-      fetchedAt: new Date().toISOString(),
-    });
+    json(res, 200, payload);
   } catch {
     json(res, 200, {
       ok: false,

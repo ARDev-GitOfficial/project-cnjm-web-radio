@@ -2,21 +2,25 @@ import { connectLambda } from "@netlify/blobs";
 import {
   adminSessionPayload,
   deleteAd,
+  deleteProgram,
   getAdSettings,
   isAdminRequest,
   isValidAdminLogin,
   listAdminAds,
+  listAdminPrograms,
   listPublicAds,
+  listPublicPrograms,
   readAdImage,
   saveAd,
   saveAdImage,
   saveAdSettings,
+  saveProgram,
+  saveProgramLogo,
   updateAdStats,
 } from "../lib/ads-store.mjs";
 
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
-const TIMETABLE_URL = "https://radioconexcaojamaica.com.br/timetable";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
 const COVER_URL = "https://player.svrdedicado.org/one-page/7586/cover";
 const CHAT_MESSAGES_URL = "https://player.svrdedicado.org/chat/7586/lista?limit=80";
@@ -608,23 +612,21 @@ async function handleNowPlaying() {
 
 async function handleSchedule() {
   try {
-    const html = await fetchText(TIMETABLE_URL);
-    const days = parseSchedule(html).filter((day) => day.slots.length > 0);
-    if (days.length === 0) throw new Error("Empty schedule.");
+    const data = await listPublicPrograms();
 
     return json(200, {
       ok: true,
       source: "live",
-      days,
+      days: data.days,
       fetchedAt: new Date().toISOString(),
     });
-  } catch {
+  } catch (error) {
     return json(200, {
       ok: false,
       source: "fallback",
       days: [],
       fetchedAt: new Date().toISOString(),
-      message: "Grade real indisponível no momento.",
+      message: error instanceof Error && error.message ? error.message : "Grade real indisponível no momento.",
     });
   }
 }
@@ -853,6 +855,104 @@ async function handleAds(event, pathname) {
   return json(404, { ok: false, message: "Endpoint de anúncios não encontrado." });
 }
 
+async function handlePrograms(event, pathname) {
+  const method = event.httpMethod || "GET";
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (pathname === "/programs") {
+    if (method === "GET") {
+      try {
+        const data = await listPublicPrograms();
+        return json(200, {
+          ok: true,
+          source: "database",
+          ...data,
+          fetchedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        return json(200, {
+          ok: false,
+          source: "fallback",
+          programs: [],
+          days: [],
+          currentProgram: null,
+          fetchedAt: new Date().toISOString(),
+          message: error instanceof Error && error.message ? error.message : "Programação indisponível.",
+        });
+      }
+    }
+
+    if (method === "POST") {
+      if (!isAdminRequest(event)) return unauthorized();
+
+      try {
+        const payload = readJsonBody(event);
+        const program = await saveProgram(payload.program ?? payload);
+        return json(200, { ok: true, program });
+      } catch (error) {
+        return serverError(error, "Não foi possível salvar o programa.");
+      }
+    }
+
+    return methodNotAllowed();
+  }
+
+  if (pathname === "/programs/admin") {
+    if (method !== "GET") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const data = await listAdminPrograms();
+      return json(200, {
+        ok: true,
+        source: "database",
+        ...data,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      return serverError(error, "Não foi possível carregar a programação.");
+    }
+  }
+
+  if (pathname === "/programs/upload-logo") {
+    if (method !== "POST") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const payload = readJsonBody(event);
+      const image = await saveProgramLogo(payload);
+      return json(200, { ok: true, image });
+    } catch (error) {
+      return serverError(error, "Não foi possível enviar a logo do programa.");
+    }
+  }
+
+  if (parts[0] === "programs" && parts[1]) {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    if (method === "PUT") {
+      try {
+        const payload = readJsonBody(event);
+        const program = await saveProgram({ ...(payload.program ?? payload), id: parts[1] });
+        return json(200, { ok: true, program });
+      } catch (error) {
+        return serverError(error, "Não foi possível atualizar o programa.");
+      }
+    }
+
+    if (method === "DELETE") {
+      try {
+        const program = await deleteProgram(parts[1]);
+        return json(200, { ok: true, program });
+      } catch (error) {
+        return serverError(error, "Não foi possível excluir o programa.");
+      }
+    }
+  }
+
+  return json(404, { ok: false, message: "Endpoint de programação não encontrado." });
+}
+
 export async function handler(event) {
   connectNetlifyBlobs(event);
 
@@ -862,6 +962,7 @@ export async function handler(event) {
 
   const pathname = apiPath(event);
   if (pathname === "/ads" || pathname.startsWith("/ads/")) return handleAds(event, pathname);
+  if (pathname === "/programs" || pathname.startsWith("/programs/")) return handlePrograms(event, pathname);
 
   if (event.httpMethod && event.httpMethod !== "GET") {
     return methodNotAllowed();

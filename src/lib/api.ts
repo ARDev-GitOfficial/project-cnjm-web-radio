@@ -2,8 +2,8 @@ import {
   fallbackCamera,
   fallbackChat,
   fallbackNowPlaying,
-  fallbackSchedule,
 } from "../data/fallbacks";
+import { fetchPrograms, localProgramsPayload } from "./programs";
 import type {
   CameraResponse,
   ChatResponse,
@@ -34,9 +34,23 @@ export async function fetchNowPlaying(signal?: AbortSignal) {
 
 export async function fetchSchedule(signal?: AbortSignal) {
   try {
-    return await readJson<ScheduleResponse>("/api/schedule", signal);
+    const programs = await fetchPrograms(signal);
+    return {
+      ok: programs.source !== "fallback",
+      source: programs.source === "database" ? "live" : "fallback",
+      days: programs.days,
+      fetchedAt: programs.fetchedAt,
+      message: programs.message,
+    } satisfies ScheduleResponse;
   } catch {
-    return fallbackSchedule();
+    const programs = localProgramsPayload("Programação local carregada como fallback.");
+    return {
+      ok: false,
+      source: "fallback",
+      days: programs.days,
+      fetchedAt: programs.fetchedAt,
+      message: programs.message,
+    } satisfies ScheduleResponse;
   }
 }
 

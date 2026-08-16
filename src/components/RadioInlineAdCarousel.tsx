@@ -13,15 +13,16 @@ import {
 const AUTO_ROTATE_MS = 6500;
 const USER_PAUSE_MS = 9000;
 
-const selectRadioAds = (ad: SiteAd) => ad.placement !== "sponsor" && Boolean(ad.imageUrl);
+const selectRadioAds = (ad: SiteAd) => Boolean(ad.imageUrl);
 
-export function RadioInlineAdCarousel() {
+export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }: { className?: string; label?: string }) {
   const { ads } = usePublicAds(selectRadioAds);
   const radioAds = useMemo(() => ads.slice(0, MAX_ADS), [ads]);
   const [activeIndex, setActiveIndex] = useState(0);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pauseUntilRef = useRef(0);
   const impressionsRef = useRef(new Set<string>());
+  const scrollTimerRef = useRef<number | null>(null);
 
   const pauseAutoRotation = useCallback(() => {
     pauseUntilRef.current = Date.now() + USER_PAUSE_MS;
@@ -34,6 +35,8 @@ export function RadioInlineAdCarousel() {
   }, [pauseAutoRotation, radioAds.length]);
 
   const updateActiveFromScroll = useCallback(() => {
+    if (scrollTimerRef.current !== null) window.clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = window.setTimeout(() => {
     const scroller = scrollerRef.current;
     if (!scroller || radioAds.length <= 1) return;
 
@@ -51,7 +54,8 @@ export function RadioInlineAdCarousel() {
       }
     });
 
-    setActiveIndex(closestIndex);
+      setActiveIndex(closestIndex);
+    }, 80);
   }, [radioAds.length]);
 
   useEffect(() => {
@@ -76,6 +80,12 @@ export function RadioInlineAdCarousel() {
   }, [activeIndex]);
 
   useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current !== null) window.clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
     const currentAd = radioAds[activeIndex];
     if (!currentAd || impressionsRef.current.has(currentAd.id)) return;
 
@@ -87,6 +97,7 @@ export function RadioInlineAdCarousel() {
     if (radioAds.length <= 1) return undefined;
 
     const interval = window.setInterval(() => {
+      if (document.hidden) return;
       if (Date.now() < pauseUntilRef.current) return;
       setActiveIndex((current) => (current + 1) % radioAds.length);
     }, AUTO_ROTATE_MS);
@@ -100,7 +111,7 @@ export function RadioInlineAdCarousel() {
   const showDots = radioAds.length <= 12;
 
   return (
-    <aside className="radio-inline-ad-card" aria-label="Publicidade">
+    <aside className={["radio-inline-ad-card", className].filter(Boolean).join(" ")} aria-label={label}>
       <div
         ref={scrollerRef}
         className="radio-inline-ad-viewport"
@@ -113,7 +124,7 @@ export function RadioInlineAdCarousel() {
         ))}
       </div>
 
-      <span className="radio-inline-ad-label">Publicidade</span>
+      <span className="radio-inline-ad-label">{label}</span>
 
       {hasControls ? (
         <>

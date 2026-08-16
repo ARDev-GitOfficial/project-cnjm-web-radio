@@ -28,13 +28,15 @@ import { BrandMantra } from "../components/BrandMantra";
 import { MarqueeText } from "../components/MarqueeText";
 import { RadioInlineAdCarousel } from "../components/RadioInlineAdCarousel";
 import { TapeRig } from "../components/TapeRig";
+import { appPrivacyPolicy } from "../data/appPolicy";
 import { useAsyncData } from "../hooks/useAsyncData";
 import { fetchCamera, fetchChatMessages, fetchSchedule } from "../lib/api";
+import { optimizedStaticImageUrl } from "../lib/imageOptimization";
 import { usePlayer } from "../player/PlayerProvider";
 import type { ScheduleDay } from "../types";
 
 const STATION_NAME = "Web Rádio Conexão Jamaica";
-const DEFAULT_COVER = "/assets/cnjmradio-launcher.png";
+const DEFAULT_COVER = "/assets/cnjmradio-launcher.webp";
 const WHATSAPP_NUMBER = "5592984227531";
 
 const navItems: { to: string; label: string; icon: LucideIcon }[] = [
@@ -45,7 +47,7 @@ const navItems: { to: string; label: string; icon: LucideIcon }[] = [
   { to: "/camera", label: "Câmera", icon: Camera },
   { to: "/equalizador", label: "Equalizador", icon: SlidersHorizontal },
   { to: "/politicas", label: "Privacidade", icon: ShieldCheck },
-  { to: "/ads", label: "Anúncios", icon: Megaphone },
+  { to: "/ads", label: "Gerenciar", icon: Megaphone },
 ];
 
 function cleanText(value: string) {
@@ -168,6 +170,10 @@ function findNextScheduleSlot(slots: ScheduleDay["slots"]) {
   return future[0]?.slot ?? slots.find((slot) => !slot.isNow) ?? null;
 }
 
+function findCurrentScheduleSlot(days: ScheduleDay[]) {
+  return days.flatMap((day) => day.slots).find((slot) => slot.isNow) ?? null;
+}
+
 export const SiteLayout = memo(function SiteLayout() {
   const { isPlaying, isBuffering, error, nowPlaying } = usePlayer();
   const location = useLocation();
@@ -278,11 +284,16 @@ export const RadioHomePage = memo(function RadioHomePage() {
     toggle,
     volume,
     setVolume,
-    refreshNowPlaying,
+    reconnect,
   } = usePlayer();
+  const scheduleLoader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
+  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 60000);
+  const currentProgram = useMemo(() => findCurrentScheduleSlot(scheduleData?.days ?? []), [scheduleData]);
   const trackTitle = cleanText(nowPlaying.track.title || "Programação ao vivo");
   const trackArtist = cleanText(nowPlaying.track.artist || STATION_NAME);
-  const cover = nowPlaying.track.coverUrl?.trim() || DEFAULT_COVER;
+  const currentProgramName = cleanText(currentProgram?.program || "Programação musical");
+  const defaultCover = optimizedStaticImageUrl(DEFAULT_COVER, { width: 360, height: 360, quality: 84 });
+  const cover = nowPlaying.track.coverUrl?.trim() || currentProgram?.logoUrl?.trim() || defaultCover;
 
   return (
     <main className="radio-page">
@@ -312,6 +323,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
                   }}
                 />
                 <div>
+                  <small className="current-program-chip">No ar: {currentProgramName}</small>
                   <MarqueeText as="strong" text={trackTitle} />
                   <span>{trackArtist}</span>
                 </div>
@@ -327,7 +339,13 @@ export const RadioHomePage = memo(function RadioHomePage() {
                   {isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}
                   <span>{isPlaying ? "Pausar rádio" : "Tocar rádio"}</span>
                 </button>
-                <button className="icon-glass radio-tool-button" type="button" onClick={() => void refreshNowPlaying()} aria-label="Atualizar faixa">
+                <button
+                  className="icon-glass radio-tool-button"
+                  type="button"
+                  onClick={() => void reconnect()}
+                  aria-label="Reconectar rádio"
+                  title="Reconectar rádio"
+                >
                   <RefreshCw size={18} />
                 </button>
                 <label className="volume-line">
@@ -336,7 +354,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
                     type="range"
                     min="0"
                     max="1"
-                    step="0.01"
+                    step="0.001"
                     value={volume}
                     onChange={(event) => setVolume(Number(event.currentTarget.value))}
                   />
@@ -660,38 +678,56 @@ export function EqualizerStationPage() {
 export function PoliciesStationPage() {
   return (
     <PageShell title="Privacidade">
-      <section className="policy-panel policy-panel-strong">
-        <article>
-          <ShieldCheck size={22} />
-          <h2>Dados técnicos</h2>
-          <p>O site consulta informações públicas da transmissão, como status do stream, faixa atual, agenda e disponibilidade da câmera, para manter a experiência atualizada.</p>
-        </article>
-        <article>
-          <Radio size={22} />
-          <h2>Preferências</h2>
-          <p>Volume, equalizador e ajustes de uso podem ficar salvos neste navegador para evitar que o ouvinte precise configurar tudo novamente.</p>
-        </article>
-        <article>
-          <MessageCircle size={22} />
-          <h2>Bate-papo e pedidos</h2>
-          <p>Campos enviados pelo ouvinte são usados apenas para comunicação com a rádio, moderação e organização dos pedidos musicais.</p>
-        </article>
-        <article>
-          <CalendarDays size={22} />
-          <h2>Publicidade</h2>
-          <p>Anúncios cadastrados pelos administradores podem registrar exibições e cliques para controle interno das campanhas.</p>
-        </article>
-        <article>
-          <Camera size={22} />
-          <h2>Segurança</h2>
-          <p>A área administrativa é restrita. Configurações sensíveis, credenciais e detalhes internos de infraestrutura não são exibidos publicamente.</p>
-        </article>
-        <article>
-          <Send size={22} />
-          <h2>Contato</h2>
-          <p>Para dúvidas sobre privacidade, remoção de conteúdo ou apoio cultural, use os canais oficiais da Web Rádio Conexão Jamaica.</p>
-        </article>
-      </section>
+      <AppPolicyContent title="Privacidade" />
     </PageShell>
+  );
+}
+
+export function AppPrivacyPolicyPage() {
+  return (
+    <PageShell title="Privacidade do app">
+      <AppPolicyContent title="Privacidade do app Android" />
+    </PageShell>
+  );
+}
+
+function AppPolicyContent({ title }: { title: string }) {
+  return (
+    <section className="policy-panel policy-panel-strong policy-panel-document">
+      <article className="policy-document-head">
+        <ShieldCheck size={24} />
+        <span className="eyebrow">Política oficial</span>
+        <h2>{title}</h2>
+        <p>{appPrivacyPolicy.subtitle}</p>
+        <dl className="policy-meta">
+          <div>
+            <dt>Versão</dt>
+            <dd>{appPrivacyPolicy.version}</dd>
+          </div>
+          <div>
+            <dt>Atualização</dt>
+            <dd>{appPrivacyPolicy.updatedAt}</dd>
+          </div>
+          <div>
+            <dt>Contato</dt>
+            <dd>{appPrivacyPolicy.contactValue}</dd>
+          </div>
+        </dl>
+      </article>
+
+      <div className="policy-section-list">
+        {appPrivacyPolicy.sections.map((section) => (
+          <article key={section.title}>
+            <h2>{section.title}</h2>
+            <p>{section.body}</p>
+            <ul className="policy-bullets">
+              {section.bullets.map((bullet) => (
+                <li key={bullet}>{bullet}</li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }

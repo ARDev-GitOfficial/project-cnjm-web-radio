@@ -4,12 +4,14 @@ import {
   CameraStationPage,
   ChatStationPage,
   EqualizerStationPage,
+  AppPrivacyPolicyPage,
   PoliciesStationPage,
   RadioHomePage,
   RequestsStationPage,
   ScheduleStationPage,
   SiteLayout,
 } from "./pages/HomePage";
+import { installOptimizedBackgroundImages } from "./lib/imageOptimization";
 import { PlayerProvider } from "./player/PlayerProvider";
 
 const AdsAdminPage = lazy(() =>
@@ -66,6 +68,11 @@ const routeSeo: Record<string, typeof defaultSeo> = {
     description:
       "Entenda como a Web Rádio Conexão Jamaica trata dados de navegação, pedidos musicais, bate-papo e recursos do site.",
   },
+  "/privacidade-app": {
+    title: "Privacidade do app | Web Rádio Conexão Jamaica",
+    description:
+      "Política de privacidade e termos do aplicativo Android da Web Rádio Conexão Jamaica.",
+  },
   "/ads": {
     title: "Área restrita | Web Rádio Conexão Jamaica",
     description:
@@ -110,14 +117,42 @@ function SeoSync() {
 }
 
 function RouteFallback() {
-  return <div className="route-loading" aria-live="polite" />;
+  return (
+    <div className="route-loading" aria-live="polite">
+      <span />
+      <strong>Carregando</strong>
+    </div>
+  );
+}
+
+function PageVisibilityPerformanceSync() {
+  useEffect(() => {
+    const updateVisibilityState = () => {
+      document.documentElement.classList.toggle("site-suspended", document.hidden);
+    };
+
+    updateVisibilityState();
+    document.addEventListener("visibilitychange", updateVisibilityState);
+
+    return () => {
+      document.documentElement.classList.remove("site-suspended");
+      document.removeEventListener("visibilitychange", updateVisibilityState);
+    };
+  }, []);
+
+  return null;
 }
 
 export default function App() {
+  useEffect(() => {
+    installOptimizedBackgroundImages();
+  }, []);
+
   return (
     <PlayerProvider>
       <BrowserRouter>
         <SeoSync />
+        <PageVisibilityPerformanceSync />
         <Routes>
           <Route element={<SiteLayout />}>
             <Route index element={<RadioHomePage />} />
@@ -130,9 +165,10 @@ export default function App() {
             <Route path="/equalizador" element={<EqualizerStationPage />} />
             <Route path="/ajustes" element={<EqualizerStationPage />} />
             <Route path="/politicas" element={<PoliciesStationPage />} />
+            <Route path="/privacidade-app" element={<AppPrivacyPolicyPage />} />
           </Route>
           <Route
-            path="/ads"
+            path="/ads/*"
             element={
               <Suspense fallback={<RouteFallback />}>
                 <AdsAdminPage />

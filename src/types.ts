@@ -43,6 +43,7 @@ export type ScheduleSlot = {
   time: string;
   program: string;
   host: string;
+  logoUrl?: string | null;
   isNow?: boolean;
 };
 

@@ -75,6 +75,11 @@ type UploadState = {
   message: string;
 };
 
+type ConversionState = UploadState & {
+  done: number;
+  total: number;
+};
+
 type AdminPanel = "dashboard" | "ads" | "programs";
 
 const adminPanelRoutes: Record<AdminPanel, string> = {
@@ -110,6 +115,12 @@ export function AdsAdminPage() {
   const [draft, setDraft] = useState<SiteAd>(() => emptyAd());
   const [selectedId, setSelectedId] = useState("");
   const [uploadState, setUploadState] = useState<UploadState>({ status: "idle", message: "" });
+  const [conversionState, setConversionState] = useState<ConversionState>({
+    status: "idle",
+    message: "",
+    done: 0,
+    total: 0,
+  });
   const [cropFile, setCropFile] = useState<File | null>(null);
   const [programUploadState, setProgramUploadState] = useState<UploadState>({ status: "idle", message: "" });
   const [actionMessage, setActionMessage] = useState("");
@@ -168,6 +179,7 @@ export function AdsAdminPage() {
       ? data?.message || "Banco global de anúncios não conectado. Ative a API, o banco e o storage no Netlify."
       : "";
   const activeCount = useMemo(() => ads.filter((ad) => ad.active).length, [ads]);
+  const webpMigrationAds = useMemo(() => ads.filter(needsWebpMigration), [ads]);
   const activeProgramCount = useMemo(() => programs.filter((program) => program.active).length, [programs]);
   const totalImpressions = useMemo(() => ads.reduce((total, ad) => total + ad.impressions, 0), [ads]);
   const totalClicks = useMemo(() => ads.reduce((total, ad) => total + ad.clicks, 0), [ads]);
@@ -392,6 +404,94 @@ export function AdsAdminPage() {
         status: "error",
         message: error instanceof Error ? error.message : "Não foi possível enviar o WebP.",
       });
+    }
+  };
+
+  const convertExistingAdsToWebp = async () => {
+    const pendingAds = webpMigrationAds.slice(0, MAX_ADS);
+    if (!pendingAds.length) {
+      setConversionState({
+        status: "ready",
+        message: "Todos os anúncios com imagem já estão em WebP.",
+        done: 0,
+        total: 0,
+      });
+      return;
+    }
+    if (!canEditAds) {
+      setConversionState({
+        status: "error",
+        message: "Conecte o banco global antes de converter anúncios.",
+        done: 0,
+        total: pendingAds.length,
+      });
+      return;
+    }
+
+    setActionMessage("");
+    setConversionState({
+      status: "checking",
+      message: `Convertendo 0 de ${pendingAds.length} anúncios...`,
+      done: 0,
+      total: pendingAds.length,
+    });
+
+    let convertedCount = 0;
+    let localNextAds = ads;
+
+    try {
+      for (const ad of pendingAds) {
+        const converted = await convertAdImageToWebpPayload(ad.imageUrl, ad.title || ad.imageKey || "anuncio");
+        const migrated = normalizeAd({
+          ...ad,
+          imageUrl: converted.dataUrl,
+          imageKey: converted.fileName,
+          imageWidth: converted.width,
+          imageHeight: converted.height,
+          imageContentType: converted.contentType,
+          imageSize: converted.size,
+          updatedAt: new Date().toISOString(),
+        });
+
+        if (isRemote && session) {
+          const uploadedImage = await uploadAdImage(session.token, {
+            fileName: converted.fileName,
+            contentType: converted.contentType,
+            width: converted.width,
+            height: converted.height,
+            dataBase64: converted.dataBase64,
+          });
+          await saveRemoteAd(session.token, normalizeAd({ ...ad, ...uploadedImage, updatedAt: new Date().toISOString() }));
+        } else {
+          localNextAds = localNextAds.map((item) => (item.id === ad.id ? migrated : item));
+        }
+
+        convertedCount += 1;
+        setConversionState({
+          status: "checking",
+          message: `Convertendo ${convertedCount} de ${pendingAds.length} anúncios...`,
+          done: convertedCount,
+          total: pendingAds.length,
+        });
+      }
+
+      if (!isRemote) persistLocalAds(localNextAds);
+      setConversionState({
+        status: "ready",
+        message: `${convertedCount} anúncio${convertedCount === 1 ? "" : "s"} convertido${convertedCount === 1 ? "" : "s"} para WebP.`,
+        done: convertedCount,
+        total: pendingAds.length,
+      });
+      setActionMessage("Migração WebP concluída. Imagens antigas substituídas por versões otimizadas.");
+      refresh();
+    } catch (error) {
+      setConversionState({
+        status: "error",
+        message: error instanceof Error ? error.message : "Não foi possível converter todos os anúncios.",
+        done: convertedCount,
+        total: pendingAds.length,
+      });
+      refresh();
     }
   };
 
@@ -665,6 +765,34 @@ export function AdsAdminPage() {
           <strong>{MAX_ADS}</strong>
           <p>Quantidade máxima de campanhas cadastradas no console.</p>
         </article>
+      </section>
+
+      <section className={webpMigrationAds.length ? "admin-notice webp-migration-panel" : "admin-notice webp-migration-panel is-soft"}>
+        <ImageUp size={18} />
+        <div>
+          <strong>{webpMigrationAds.length ? `${webpMigrationAds.length} imagem(ns) antiga(s) em PNG` : "Anúncios otimizados em WebP"}</strong>
+          <span>
+            {webpMigrationAds.length
+              ? "Converta os anúncios cadastrados no banco para WebP e libere os blobs antigos quando o registro for salvo."
+              : "Novos uploads já saem em WebP 1700 x 450px."}
+          </span>
+          {conversionState.message ? (
+            <small className={conversionState.status === "error" ? "form-warning" : "upload-ok"}>
+              {conversionState.message}
+            </small>
+          ) : null}
+        </div>
+        <button
+          className="ghost-button"
+          type="button"
+          disabled={!webpMigrationAds.length || !canEditAds || conversionState.status === "checking"}
+          onClick={() => {
+            void convertExistingAdsToWebp();
+          }}
+        >
+          <RefreshCw size={16} />
+          {conversionState.status === "checking" ? `${conversionState.done}/${conversionState.total}` : "Converter para WebP"}
+        </button>
       </section>
 
       <section className="ad-settings-panel">
@@ -1175,4 +1303,99 @@ function fromDateTimeInput(value: string) {
 
 function placementLabel(value: SiteAd["placement"]) {
   return value === "program" ? "Programa" : "Comercial";
+}
+
+function needsWebpMigration(ad: SiteAd) {
+  if (!ad.imageUrl) return false;
+
+  const contentType = String(ad.imageContentType || "").toLowerCase();
+  const imageKey = String(ad.imageKey || "").toLowerCase();
+  const imageUrl = String(ad.imageUrl || "").toLowerCase();
+
+  if (contentType === "image/webp" || imageKey.endsWith(".webp") || imageUrl.includes(".webp")) return false;
+  if (contentType === "image/png" || imageKey.endsWith(".png") || imageUrl.startsWith("data:image/png")) return true;
+
+  return ad.imageUrl.startsWith("/api/ads/image/");
+}
+
+async function convertAdImageToWebpPayload(src: string, fileName: string) {
+  const response = await fetch(src, { cache: "no-store" });
+  if (!response.ok) throw new Error("Não foi possível baixar uma imagem antiga para converter.");
+
+  const sourceBlob = await response.blob();
+  const sourceUrl = URL.createObjectURL(sourceBlob);
+
+  try {
+    const image = await loadImageElement(sourceUrl);
+    if (!image.naturalWidth || !image.naturalHeight) throw new Error("Imagem antiga sem tamanho válido para conversão.");
+
+    const canvas = document.createElement("canvas");
+    canvas.width = AD_BANNER_WIDTH;
+    canvas.height = AD_BANNER_HEIGHT;
+
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) throw new Error("Seu navegador não conseguiu preparar o WebP.");
+
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.fillStyle = "#030603";
+    context.fillRect(0, 0, AD_BANNER_WIDTH, AD_BANNER_HEIGHT);
+
+    const scale = Math.max(AD_BANNER_WIDTH / image.naturalWidth, AD_BANNER_HEIGHT / image.naturalHeight);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    const x = (AD_BANNER_WIDTH - width) / 2;
+    const y = (AD_BANNER_HEIGHT - height) / 2;
+    context.drawImage(image, x, y, width, height);
+
+    const webpBlob = await canvasToBlob(canvas, "image/webp", 0.84);
+    const dataUrl = await blobToDataUrl(webpBlob);
+
+    return {
+      fileName: toWebpMigrationFileName(fileName),
+      contentType: "image/webp" as const,
+      width: AD_BANNER_WIDTH,
+      height: AD_BANNER_HEIGHT,
+      dataUrl,
+      dataBase64: dataUrl.split(",")[1] || "",
+      size: webpBlob.size,
+    };
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+}
+
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Não foi possível ler uma imagem antiga."));
+    image.src = src;
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Não foi possível gerar WebP neste navegador."));
+        return;
+      }
+      resolve(blob);
+    }, type, quality);
+  });
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Não foi possível preparar o WebP para upload."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function toWebpMigrationFileName(fileName: string) {
+  const cleanName = fileName.trim().replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "anuncio";
+  return `${cleanName}-1700x450.webp`;
 }

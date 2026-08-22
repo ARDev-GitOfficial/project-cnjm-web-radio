@@ -36,7 +36,7 @@ export function installOptimizedBackgroundImages() {
   const root = document.documentElement;
   root.style.setProperty(
     "--desktop-background-image",
-    `url("${optimizedStaticImageUrl("/assets/glass_ref_background.webp", { width: 1600, quality: 76 })}")`,
+    `url("${optimizedStaticImageUrl("/assets/bg-cnjm.webp", { width: 1600, quality: 76 })}")`,
   );
   root.style.setProperty(
     "--mobile-background-image",

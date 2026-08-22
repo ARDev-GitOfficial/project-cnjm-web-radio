@@ -281,6 +281,8 @@ export function updateAdStats(id: string, field: "impressions" | "clicks") {
 }
 
 export async function sendAdStat(id: string, field: "impressions" | "clicks") {
+  if (field === "impressions") return;
+
   try {
     await requestJson(`${API_BASE}/${encodeURIComponent(id)}/stats`, {
       method: "POST",

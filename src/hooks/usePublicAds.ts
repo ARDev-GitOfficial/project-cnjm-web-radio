@@ -7,7 +7,10 @@ export function usePublicAds(selectAd?: (ad: SiteAd) => boolean) {
   const query = useQuery({
     queryKey: ["public-ads"],
     queryFn: ({ signal }) => fetchPublicAds(signal),
-    refetchInterval: 60_000,
+    staleTime: 300_000,
+    gcTime: 1_800_000,
+    refetchInterval: 300_000,
+    refetchIntervalInBackground: false,
   });
 
   useEffect(() => {

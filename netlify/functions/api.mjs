@@ -122,10 +122,17 @@ const baseHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization",
 };
 
-function json(statusCode, payload) {
+const publicAdsCacheHeaders = {
+  "cache-control": "public, max-age=300, s-maxage=600, stale-while-revalidate=900",
+};
+
+function json(statusCode, payload, headers = {}) {
   return {
     statusCode,
-    headers: baseHeaders,
+    headers: {
+      ...baseHeaders,
+      ...headers,
+    },
     body: JSON.stringify(payload),
   };
 }
@@ -734,7 +741,7 @@ async function handleAds(event, pathname) {
           source: "database",
           ...data,
           fetchedAt: new Date().toISOString(),
-        });
+        }, publicAdsCacheHeaders);
       } catch (error) {
         return json(200, {
           ok: false,
@@ -743,7 +750,7 @@ async function handleAds(event, pathname) {
           settings: fallbackAdSettings(),
           fetchedAt: new Date().toISOString(),
           message: error instanceof Error && error.message ? error.message : "Banco de anúncios indisponível.",
-        });
+        }, publicAdsCacheHeaders);
       }
     }
 
@@ -822,6 +829,9 @@ async function handleAds(event, pathname) {
 
     try {
       const payload = readJsonBody(event);
+      if (payload.field === "impressions") {
+        return json(200, { ok: true, skipped: true, message: "Exibições não são gravadas para economizar banco." });
+      }
       const ad = await updateAdStats(parts[1], payload.field);
       return json(200, { ok: true, ad });
     } catch (error) {

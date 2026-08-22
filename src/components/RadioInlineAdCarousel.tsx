@@ -21,7 +21,6 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
   const [activeIndex, setActiveIndex] = useState(0);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pauseUntilRef = useRef(0);
-  const impressionsRef = useRef(new Set<string>());
   const scrollTimerRef = useRef<number | null>(null);
 
   const pauseAutoRotation = useCallback(() => {
@@ -84,14 +83,6 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
       if (scrollTimerRef.current !== null) window.clearTimeout(scrollTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    const currentAd = radioAds[activeIndex];
-    if (!currentAd || impressionsRef.current.has(currentAd.id)) return;
-
-    impressionsRef.current.add(currentAd.id);
-    void sendAdStat(currentAd.id, "impressions");
-  }, [activeIndex, radioAds]);
 
   useEffect(() => {
     if (radioAds.length <= 1) return undefined;

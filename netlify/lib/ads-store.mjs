@@ -91,6 +91,17 @@ function imageContentTypeFromKey(key) {
   return String(key || "").toLowerCase().endsWith(".webp") ? "image/webp" : "image/png";
 }
 
+async function deleteStoredImage(key) {
+  const safeKey = String(key || "").replace(/^\/+/, "");
+  if (!safeKey || safeKey.includes("..")) return;
+
+  try {
+    await adImageStore().delete(safeKey);
+  } catch {
+    // Storage cleanup should never block saving metadata.
+  }
+}
+
 function normalizePlacement(value) {
   return value === "program" ? "program" : "commercial";
 }
@@ -387,7 +398,14 @@ export async function saveAdSettings(payload) {
 
 export async function saveAd(payload) {
   const normalized = normalizeAdPayload(payload);
-  const [ad] = await db()`
+  const database = db();
+  const [currentAd] = await database`
+    SELECT image_key AS "imageKey"
+    FROM site_ads
+    WHERE id = ${normalized.id}
+    LIMIT 1
+  `;
+  const [ad] = await database`
     INSERT INTO site_ads (
       id,
       title,
@@ -476,6 +494,10 @@ export async function saveAd(payload) {
       updated_at AS "updatedAt"
   `;
 
+  if (currentAd?.imageKey && currentAd.imageKey !== ad.imageKey) {
+    await deleteStoredImage(currentAd.imageKey);
+  }
+
   return serializeAd(ad);
 }
 
@@ -506,6 +528,9 @@ export async function deleteAd(id) {
       created_at AS "createdAt",
       updated_at AS "updatedAt"
   `;
+  if (ad?.imageKey) {
+    await deleteStoredImage(ad.imageKey);
+  }
   return ad ? serializeAd(ad) : null;
 }
 
@@ -637,7 +662,14 @@ export async function saveProgram(payload) {
   const normalized = normalizeProgramPayload(payload);
   if (!normalized.program) throw new Error("Informe o nome do programa.");
 
-  const [program] = await db()`
+  const database = db();
+  const [currentProgram] = await database`
+    SELECT logo_key AS "logoKey"
+    FROM station_programs
+    WHERE id = ${normalized.id}
+    LIMIT 1
+  `;
+  const [program] = await database`
     INSERT INTO station_programs (
       id,
       day_id,
@@ -696,6 +728,10 @@ export async function saveProgram(payload) {
       updated_at AS "updatedAt"
   `;
 
+  if (currentProgram?.logoKey && currentProgram.logoKey !== program.logoKey) {
+    await deleteStoredImage(currentProgram.logoKey);
+  }
+
   return serializeProgram(program);
 }
 
@@ -718,6 +754,9 @@ export async function deleteProgram(id) {
       created_at AS "createdAt",
       updated_at AS "updatedAt"
   `;
+  if (program?.logoKey) {
+    await deleteStoredImage(program.logoKey);
+  }
 
   return program ? serializeProgram(program) : null;
 }
@@ -728,7 +767,7 @@ export async function saveAdImage(payload) {
   const height = Number(payload.height || 0);
   const dataBase64 = String(payload.dataBase64 || "");
 
-  if (!isSupportedImageContentType(contentType)) throw new Error("Envie uma imagem PNG ou WebP.");
+  if (contentType !== "image/webp") throw new Error("Envie uma imagem WebP otimizada.");
   if (width !== AD_BANNER_WIDTH || height !== AD_BANNER_HEIGHT) {
     throw new Error(`A imagem precisa ter ${AD_BANNER_WIDTH}x${AD_BANNER_HEIGHT}px.`);
   }

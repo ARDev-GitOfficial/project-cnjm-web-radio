@@ -46,8 +46,8 @@
   );
   --brand-flow-size: 360px 100%;
   --shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-  --desktop-background-image: url("/assets/bg-cnjm.webp");
-  --mobile-background-image: url("/assets/glass_ref_background.webp");
+  --desktop-background-image: url("/assets/bg-cnjm-landscape-v2.webp");
+  --mobile-background-image: url("/assets/glass-ref-background-portrait-v2.webp");
   --background-image: var(--desktop-background-image);
   font-size: 16px;
   -webkit-text-size-adjust: 100%;

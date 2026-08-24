@@ -12,6 +12,9 @@ function average(values: Uint8Array, start: number, end: number) {
   return total / Math.max(1, safeEnd - start) / 255;
 }
 
+const DESKTOP_CANVAS_PIXEL_BUDGET = 1_120_000;
+const TOUCH_CANVAS_PIXEL_BUDGET = 680_000;
+
 export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(analyser);
@@ -24,7 +27,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const context = canvas?.getContext("2d");
+    const context = canvas?.getContext("2d", { alpha: true, desynchronized: true });
     if (!canvas || !context) return undefined;
 
     let animationId: number | null = null;
@@ -39,6 +42,11 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     let targetFps = isReducedMotion ? 30 : 60;
     let overloadFrames = 0;
     let recoveryFrames = 0;
+    let viewportWidth = 1;
+    let viewportHeight = 1;
+    let barGradient: CanvasGradient | null = null;
+    let glowGradient: CanvasGradient | null = null;
+    let gradientKey = "";
 
     let bins = new Uint8Array(64);
     const syntheticBins = new Uint8Array(48);
@@ -48,7 +56,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     const startTime = performance.now();
     const loopMs = 36000;
 
-    const particles = Array.from({ length: 64 }, (_, index) => ({
+    const particles = Array.from({ length: 36 }, (_, index) => ({
       x: (Math.sin(index * 41.23) * 0.5 + 0.5) * 100,
       y: (Math.sin(index * 17.71) * 0.5 + 0.5) * 100,
       size: 0.62 + (index % 7) * 0.16,
@@ -90,12 +98,18 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     };
 
     const resize = () => {
-      const maxPixelRatio = isReducedMotion ? 1 : isCoarsePointer ? 1.12 : 1.35;
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, maxPixelRatio);
       const rect = canvas.getBoundingClientRect();
-      canvas.width = Math.max(1, Math.floor(rect.width * pixelRatio));
-      canvas.height = Math.max(1, Math.floor(rect.height * pixelRatio));
+      viewportWidth = Math.max(1, rect.width);
+      viewportHeight = Math.max(1, rect.height);
+      const maxPixelRatio = isReducedMotion ? 1 : isCoarsePointer ? 1 : 1.1;
+      const pixelBudget = isCoarsePointer ? TOUCH_CANVAS_PIXEL_BUDGET : DESKTOP_CANVAS_PIXEL_BUDGET;
+      const areaRatio = Math.sqrt(pixelBudget / Math.max(1, viewportWidth * viewportHeight));
+      const minPixelRatio = viewportWidth > 2600 ? 0.48 : viewportWidth > 1800 ? 0.65 : 0.78;
+      const pixelRatio = Math.max(minPixelRatio, Math.min(window.devicePixelRatio || 1, maxPixelRatio, areaRatio));
+      canvas.width = Math.max(1, Math.floor(viewportWidth * pixelRatio));
+      canvas.height = Math.max(1, Math.floor(viewportHeight * pixelRatio));
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      gradientKey = "";
     };
 
     const requestResize = () => {
@@ -140,8 +154,8 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       lastFrameTime = time - (deltaTime % frameInterval);
       const renderStart = performance.now();
 
-      const width = canvas.clientWidth;
-      const height = canvas.clientHeight;
+      const width = viewportWidth;
+      const height = viewportHeight;
       if (width <= 0 || height <= 0) {
         requestFrame();
         return;
@@ -177,7 +191,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       const beat = playingRef.current ? Math.min(1, kick * 0.62 + mid * 0.28 + high * 0.12) : 0.16;
       const preferredPitch = isReducedMotion ? (width < 560 ? 24 : 26) : width < 560 ? 16 : width < 920 ? 18 : 20;
       const minBarWidth = width < 560 ? 4 : width < 920 ? 5 : 6;
-      const maxBars = isReducedMotion ? 34 : isCoarsePointer ? 40 : 60;
+      const maxBars = isReducedMotion ? 32 : isCoarsePointer ? 38 : 48;
       const barCount = Math.max(20, Math.min(maxBars, Math.floor(width / preferredPitch)));
       if (easedBars.length !== barCount) easedBars = new Float32Array(barCount);
       const pitch = width / barCount;
@@ -189,28 +203,33 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
 
       context.clearRect(0, 0, width, height);
       context.globalCompositeOperation = "source-over";
-      context.fillStyle = "rgba(3, 6, 3, 0.4)";
+      context.fillStyle = "rgba(3, 6, 3, 0.28)";
       context.fillRect(0, 0, width, height);
 
-      context.globalCompositeOperation = "lighter";
-      const sweepProgress = (Math.sin(loopAngle - Math.PI / 2) + 1) / 2;
-      const sweepX = width * (-0.12 + sweepProgress * 1.24);
-      const sweep = context.createLinearGradient(sweepX - width * 0.22, 0, sweepX + width * 0.08, height);
-      sweep.addColorStop(0, "rgba(47, 232, 138, 0)");
-      sweep.addColorStop(0.5, `rgba(243, 203, 79, ${0.04 + beat * 0.05})`);
-      sweep.addColorStop(1, "rgba(47, 232, 138, 0)");
-      context.fillStyle = sweep;
-      context.fillRect(0, 0, width, height);
+      if (!isReducedMotion && width > 640) {
+        const sweepProgress = (Math.sin(loopAngle - Math.PI / 2) + 1) / 2;
+        const sweepX = width * (-0.12 + sweepProgress * 1.24);
+        const sweep = context.createLinearGradient(sweepX - width * 0.18, 0, sweepX + width * 0.06, height);
+        sweep.addColorStop(0, "rgba(47, 232, 138, 0)");
+        sweep.addColorStop(0.5, `rgba(243, 203, 79, ${0.03 + beat * 0.035})`);
+        sweep.addColorStop(1, "rgba(47, 232, 138, 0)");
+        context.fillStyle = sweep;
+        context.fillRect(0, 0, width, height);
+      }
 
-      const barGradient = context.createLinearGradient(0, baselineY - height * 0.54, 0, baselineY + height * 0.1);
-      barGradient.addColorStop(0, "rgba(47, 232, 138, 0.72)");
-      barGradient.addColorStop(0.52, "rgba(243, 203, 79, 0.6)");
-      barGradient.addColorStop(1, "rgba(255, 247, 201, 0.16)");
+      const nextGradientKey = `${Math.round(width)}:${Math.round(height)}:${Math.round(baselineY)}`;
+      if (!barGradient || !glowGradient || gradientKey !== nextGradientKey) {
+        gradientKey = nextGradientKey;
+        barGradient = context.createLinearGradient(0, baselineY - height * 0.54, 0, baselineY + height * 0.1);
+        barGradient.addColorStop(0, "rgba(47, 232, 138, 0.68)");
+        barGradient.addColorStop(0.52, "rgba(243, 203, 79, 0.56)");
+        barGradient.addColorStop(1, "rgba(255, 247, 201, 0.14)");
 
-      const glowGradient = context.createLinearGradient(0, baselineY - height * 0.5, 0, baselineY);
-      glowGradient.addColorStop(0, "rgba(47, 232, 138, 0.18)");
-      glowGradient.addColorStop(0.62, "rgba(243, 203, 79, 0.14)");
-      glowGradient.addColorStop(1, "rgba(255, 247, 201, 0.03)");
+        glowGradient = context.createLinearGradient(0, baselineY - height * 0.5, 0, baselineY);
+        glowGradient.addColorStop(0, "rgba(47, 232, 138, 0.14)");
+        glowGradient.addColorStop(0.62, "rgba(243, 203, 79, 0.1)");
+        glowGradient.addColorStop(1, "rgba(255, 247, 201, 0.02)");
+      }
       const showGlow = !isReducedMotion && !isCoarsePointer && width > 768;
 
       for (let index = 0; index < barCount; index += 1) {
@@ -242,8 +261,8 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         const x = startX + index * (barWidth + gap);
         const y = baselineY - barHeight;
 
-        if (showGlow && power > 0.34 && index % 2 === 0) {
-          context.globalAlpha = Math.min(0.34, 0.08 + power * 0.18 + beat * 0.08);
+        if (showGlow && power > 0.38 && index % 3 === 0) {
+          context.globalAlpha = Math.min(0.24, 0.06 + power * 0.13 + beat * 0.05);
           context.fillStyle = glowGradient;
           roundRect(context, x - gap, y - 3, barWidth + gap * 2, barHeight + 7, Math.min(10, barWidth));
           context.fill();
@@ -263,7 +282,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       }
 
       context.shadowBlur = 0;
-      const visibleParticleCount = isReducedMotion ? 0 : width < 768 || isCoarsePointer ? 24 : 48;
+      const visibleParticleCount = isReducedMotion ? 0 : width < 768 || isCoarsePointer ? 14 : 28;
       for (let particleIndex = 0; particleIndex < visibleParticleCount; particleIndex += 1) {
         const particle = particles[particleIndex];
         if (!particle) continue;

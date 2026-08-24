@@ -498,6 +498,7 @@ export function normalizeOptionalUrl(value: string) {
 export function optimizedAdImageUrl(src: string, width = AD_BANNER_WIDTH, height = AD_BANNER_HEIGHT) {
   if (!src || src.startsWith("data:") || src.startsWith("blob:")) return src;
   if (typeof window === "undefined") return src;
+  if (src.startsWith("/api/ads/image/")) return src;
 
   const host = window.location.hostname;
   if (host === "localhost" || host === "127.0.0.1") return src;

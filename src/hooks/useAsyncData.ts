@@ -17,10 +17,16 @@ export function useAsyncData<T>(
   const [isLoading, setIsLoading] = useState(true);
   const [version, setVersion] = useState(0);
   const hasLoadedRef = useRef(false);
+  const lastLoadedAtRef = useRef(0);
 
   const refresh = useCallback(() => {
     setVersion((current) => current + 1);
   }, []);
+
+  const refreshIfStale = useCallback(() => {
+    if (!intervalMs) return;
+    if (Date.now() - lastLoadedAtRef.current >= intervalMs) refresh();
+  }, [intervalMs, refresh]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -36,6 +42,7 @@ export function useAsyncData<T>(
         setData(result);
         setError(null);
         hasLoadedRef.current = true;
+        lastLoadedAtRef.current = Date.now();
       })
       .catch((reason: unknown) => {
         if (!mounted || controller.signal.aborted) return;
@@ -55,7 +62,7 @@ export function useAsyncData<T>(
     if (!intervalMs) return undefined;
 
     const refreshWhenVisible = () => {
-      if (!document.hidden) refresh();
+      if (!document.hidden) refreshIfStale();
     };
 
     const timer = window.setInterval(refreshWhenVisible, intervalMs);
@@ -65,7 +72,7 @@ export function useAsyncData<T>(
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [intervalMs, refresh]);
+  }, [intervalMs, refreshIfStale]);
 
   return { data, error, isLoading, refresh };
 }

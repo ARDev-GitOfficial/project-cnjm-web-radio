@@ -50,3 +50,14 @@ export const stationPrograms = pgTable("station_programs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const stationDjs = pgTable("station_djs", {
+  id: text("id").primaryKey(),
+  signatures: text("signatures").notNull().default(""),
+  djName: text("dj_name").notNull().default(""),
+  programName: text("program_name").notNull().default(""),
+  active: boolean("active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

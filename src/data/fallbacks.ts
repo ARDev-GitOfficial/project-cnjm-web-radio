@@ -25,6 +25,16 @@ export const fallbackNowPlaying = (): NowPlayingResponse => ({
     bitrate: "128",
     isOnline: true,
     uptimeSeconds: null,
+    streamSource: null,
+  },
+  liveDj: {
+    state: "online",
+    isLive: false,
+    djName: null,
+    programName: null,
+    matchedSignature: null,
+    detectedValue: null,
+    source: "fallback",
   },
   history: [
     {

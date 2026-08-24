@@ -2,24 +2,29 @@ import { connectLambda } from "@netlify/blobs";
 import {
   adminSessionPayload,
   deleteAd,
+  deleteDj,
   deleteProgram,
   getAdSettings,
   isAdminRequest,
   isValidAdminLogin,
   listAdminAds,
+  listAdminDjs,
   listAdminPrograms,
   listPublicAds,
+  listPublicDjs,
   listPublicPrograms,
   readAdImage,
   saveAd,
   saveAdImage,
   saveAdSettings,
+  saveDj,
   saveProgram,
   saveProgramLogo,
   updateAdStats,
 } from "../lib/ads-store.mjs";
 
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
+const STATISTICS_URL = "https://s03.svrdedicado.org:7586/statistics?json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
 const COVER_URL = "https://player.svrdedicado.org/one-page/7586/cover";
@@ -122,8 +127,41 @@ const baseHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization",
 };
 
-const publicAdsCacheHeaders = {
-  "cache-control": "public, max-age=300, s-maxage=600, stale-while-revalidate=900",
+function publicCacheHeaders({ browserMaxAge = 60, cdnMaxAge = 300, staleWhileRevalidate = 900 } = {}) {
+  return {
+    "cache-control": `public, max-age=${browserMaxAge}, stale-while-revalidate=${staleWhileRevalidate}`,
+    "Netlify-CDN-Cache-Control": `public, durable, s-maxage=${cdnMaxAge}, stale-while-revalidate=${staleWhileRevalidate}`,
+  };
+}
+
+const publicAdsCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 600,
+  cdnMaxAge: 1800,
+  staleWhileRevalidate: 3600,
+});
+const publicProgramsCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 900,
+  cdnMaxAge: 3600,
+  staleWhileRevalidate: 7200,
+});
+const nowPlayingCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 30,
+  cdnMaxAge: 45,
+  staleWhileRevalidate: 180,
+});
+const cameraCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 1800,
+  cdnMaxAge: 3600,
+  staleWhileRevalidate: 86400,
+});
+const chatCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 45,
+  cdnMaxAge: 90,
+  staleWhileRevalidate: 240,
+});
+const publicImageCacheHeaders = {
+  "cache-control": "public, max-age=31536000, immutable",
+  "Netlify-CDN-Cache-Control": "public, durable, s-maxage=31536000",
 };
 
 function json(statusCode, payload, headers = {}) {
@@ -333,6 +371,19 @@ function parseTrack(rawValue) {
   };
 }
 
+function normalizeStreamStatsPayload(payload) {
+  if (Array.isArray(payload?.streams) && payload.streams[0]) return payload.streams[0];
+  return payload || {};
+}
+
+async function fetchStreamStats() {
+  try {
+    return normalizeStreamStatsPayload(await fetchJson(STATISTICS_URL));
+  } catch {
+    return normalizeStreamStatsPayload(await fetchJson(STATS_URL));
+  }
+}
+
 function parseSafeTrack(rawValue) {
   return isTechnicalTrack(rawValue) ? parseTrack(SAFE_NOW_PLAYING) : parseTrack(rawValue);
 }
@@ -422,6 +473,98 @@ async function resolveNowPlayingTrack(rawValue, coverUrl, history) {
 
   lastPublicTrack = nextTrack;
   return nextTrack;
+}
+
+function comparableLiveValue(value) {
+  return normalizePublicText(value)
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+function djSignatures(dj) {
+  return String(dj?.signatures || "")
+    .split(/[\n,;]+/)
+    .map((signature) => signature.trim())
+    .filter(Boolean);
+}
+
+function maybeDjLoginValue(value) {
+  const clean = normalizePublicText(value);
+  return /^[a-z0-9_.-]+(?::[a-z0-9_.-]+)?$/i.test(clean) ? clean : null;
+}
+
+function liveDjCandidates(stats, rawValue) {
+  return [
+    stats.streamsource,
+    stats.source,
+    stats.dj,
+    stats.dj_login,
+    stats.djLogin,
+    stats.currentdj,
+    stats.currentDj,
+    stats.encoder,
+    stats.username,
+    stats.user,
+    stats.login,
+    maybeDjLoginValue(rawValue),
+  ].filter(Boolean);
+}
+
+function resolveLiveDjStatus(stats, rawValue, djs) {
+  const isOnline = Number(stats.streamstatus ?? 0) === 1;
+  if (!isOnline) {
+    return {
+      state: "offline",
+      isLive: false,
+      djName: null,
+      programName: null,
+      matchedSignature: null,
+      detectedValue: null,
+      source: "autodj",
+    };
+  }
+
+  const candidates = liveDjCandidates(stats, rawValue);
+  for (const dj of djs) {
+    if (dj?.active === false) continue;
+
+    for (const signature of djSignatures(dj)) {
+      const cleanSignature = comparableLiveValue(signature);
+      if (cleanSignature.length < 3) continue;
+
+      const match = candidates.find((candidate) => {
+        const cleanCandidate = comparableLiveValue(candidate);
+        if (cleanCandidate.length < 3) return false;
+        return cleanCandidate === cleanSignature ||
+          cleanCandidate.includes(cleanSignature) ||
+          cleanSignature.includes(cleanCandidate);
+      });
+
+      if (match) {
+        return {
+          state: "live",
+          isLive: true,
+          djName: dj.djName || "DJ ao vivo",
+          programName: dj.programName || "Programa Ao Vivo",
+          matchedSignature: signature,
+          detectedValue: normalizePublicText(match),
+          source: "dj",
+        };
+      }
+    }
+  }
+
+  return {
+    state: "online",
+    isLive: false,
+    djName: null,
+    programName: null,
+    matchedSignature: null,
+    detectedValue: null,
+    source: "autodj",
+  };
 }
 
 function safeHistoryFallback() {
@@ -567,18 +710,29 @@ function parseChatMessages(html) {
 
 async function handleNowPlaying() {
   try {
-    const [stats, historyHtml, coverUrl] = await Promise.all([
-      fetchJson(STATS_URL),
+    const [stats, historyHtml, coverUrl, djs] = await Promise.all([
+      fetchStreamStats(),
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
+      listPublicDjs(),
     ]);
     const history = parseHistory(historyHtml);
-    const track = await resolveNowPlayingTrack(stats.songtitle ?? "", coverUrl, history);
+    const rawSongTitle = stats.songtitle ?? "";
+    const track = await resolveNowPlayingTrack(rawSongTitle, coverUrl, history);
+    const liveDj = resolveLiveDjStatus(stats, rawSongTitle, djs);
+    const displayTrack = liveDj.isLive
+      ? {
+          ...track,
+          artist: liveDj.djName || "DJ ao vivo",
+          title: liveDj.programName || "Programa Ao Vivo",
+          raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
+        }
+      : track;
 
     return json(200, {
       ok: true,
       source: "live",
-      track,
+      track: displayTrack,
       stats: {
         listeners: Number(stats.currentlisteners ?? 0),
         peakListeners: Number(stats.peaklisteners ?? 0),
@@ -588,10 +742,12 @@ async function handleNowPlaying() {
         bitrate: stats.bitrate ?? "128",
         isOnline: Number(stats.streamstatus ?? 0) === 1,
         uptimeSeconds: Number(stats.streamuptime ?? 0) || null,
+        streamSource: stats.streamsource ?? stats.source ?? null,
       },
+      liveDj,
       history: history.length > 0 ? history : safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
-    });
+    }, nowPlayingCacheHeaders);
   } catch {
     return json(200, {
       ok: false,
@@ -609,11 +765,21 @@ async function handleNowPlaying() {
         bitrate: "128",
         isOnline: true,
         uptimeSeconds: null,
+        streamSource: null,
+      },
+      liveDj: {
+        state: "connecting",
+        isLive: false,
+        djName: null,
+        programName: null,
+        matchedSignature: null,
+        detectedValue: null,
+        source: "fallback",
       },
       history: safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
       message: "Dados ao vivo indisponíveis no momento.",
-    });
+    }, nowPlayingCacheHeaders);
   }
 }
 
@@ -626,7 +792,7 @@ async function handleSchedule() {
       source: "live",
       days: data.days,
       fetchedAt: new Date().toISOString(),
-    });
+    }, publicProgramsCacheHeaders);
   } catch (error) {
     return json(200, {
       ok: false,
@@ -634,7 +800,7 @@ async function handleSchedule() {
       days: [],
       fetchedAt: new Date().toISOString(),
       message: error instanceof Error && error.message ? error.message : "Grade real indisponível no momento.",
-    });
+    }, publicProgramsCacheHeaders);
   }
 }
 
@@ -647,7 +813,7 @@ async function handleCamera() {
       playlistUrl: camera.playlistUrl,
       embedUrl: camera.embedUrl,
       fetchedAt: new Date().toISOString(),
-    });
+    }, cameraCacheHeaders);
   } catch {
     return json(200, {
       ok: false,
@@ -656,7 +822,7 @@ async function handleCamera() {
       embedUrl: null,
       fetchedAt: new Date().toISOString(),
       message: "Câmera indisponível no momento.",
-    });
+    }, cameraCacheHeaders);
   }
 }
 
@@ -668,7 +834,7 @@ async function handleChatMessages() {
       source: "live",
       messages: parseChatMessages(html),
       fetchedAt: new Date().toISOString(),
-    });
+    }, chatCacheHeaders);
   } catch {
     return json(200, {
       ok: false,
@@ -676,7 +842,7 @@ async function handleChatMessages() {
       messages: [],
       fetchedAt: new Date().toISOString(),
       message: "Mensagens reais indisponíveis no momento.",
-    });
+    }, chatCacheHeaders);
   }
 }
 
@@ -722,7 +888,7 @@ async function handleAds(event, pathname) {
         isBase64Encoded: true,
         headers: {
           "content-type": image.contentType,
-          "cache-control": "public, max-age=31536000, immutable",
+          ...publicImageCacheHeaders,
           "access-control-allow-origin": "*",
         },
         body: image.body,
@@ -878,7 +1044,7 @@ async function handlePrograms(event, pathname) {
           source: "database",
           ...data,
           fetchedAt: new Date().toISOString(),
-        });
+        }, publicProgramsCacheHeaders);
       } catch (error) {
         return json(200, {
           ok: false,
@@ -888,7 +1054,7 @@ async function handlePrograms(event, pathname) {
           currentProgram: null,
           fetchedAt: new Date().toISOString(),
           message: error instanceof Error && error.message ? error.message : "Programação indisponível.",
-        });
+        }, publicProgramsCacheHeaders);
       }
     }
 
@@ -963,6 +1129,66 @@ async function handlePrograms(event, pathname) {
   return json(404, { ok: false, message: "Endpoint de programação não encontrado." });
 }
 
+async function handleDjs(event, pathname) {
+  const method = event.httpMethod || "GET";
+  const parts = pathname.split("/").filter(Boolean);
+
+  if (pathname === "/djs") {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    if (method === "GET") {
+      try {
+        const djs = await listAdminDjs();
+        return json(200, {
+          ok: true,
+          source: "database",
+          djs,
+          fetchedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        return serverError(error, "Não foi possível carregar os DJs.");
+      }
+    }
+
+    if (method === "POST") {
+      try {
+        const payload = readJsonBody(event);
+        const dj = await saveDj(payload.dj ?? payload);
+        return json(200, { ok: true, dj });
+      } catch (error) {
+        return serverError(error, "Não foi possível salvar o DJ.");
+      }
+    }
+
+    return methodNotAllowed();
+  }
+
+  if (parts[0] === "djs" && parts[1]) {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    if (method === "PUT") {
+      try {
+        const payload = readJsonBody(event);
+        const dj = await saveDj({ ...(payload.dj ?? payload), id: parts[1] });
+        return json(200, { ok: true, dj });
+      } catch (error) {
+        return serverError(error, "Não foi possível atualizar o DJ.");
+      }
+    }
+
+    if (method === "DELETE") {
+      try {
+        const dj = await deleteDj(parts[1]);
+        return json(200, { ok: true, dj });
+      } catch (error) {
+        return serverError(error, "Não foi possível excluir o DJ.");
+      }
+    }
+  }
+
+  return json(404, { ok: false, message: "Endpoint de DJs não encontrado." });
+}
+
 export async function handler(event) {
   connectNetlifyBlobs(event);
 
@@ -973,6 +1199,7 @@ export async function handler(event) {
   const pathname = apiPath(event);
   if (pathname === "/ads" || pathname.startsWith("/ads/")) return handleAds(event, pathname);
   if (pathname === "/programs" || pathname.startsWith("/programs/")) return handlePrograms(event, pathname);
+  if (pathname === "/djs" || pathname.startsWith("/djs/")) return handleDjs(event, pathname);
 
   if (event.httpMethod && event.httpMethod !== "GET") {
     return methodNotAllowed();

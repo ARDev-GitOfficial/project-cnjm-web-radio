@@ -33,7 +33,7 @@ import { useAsyncData } from "../hooks/useAsyncData";
 import { fetchCamera, fetchChatMessages, fetchSchedule } from "../lib/api";
 import { optimizedStaticImageUrl } from "../lib/imageOptimization";
 import { usePlayer } from "../player/PlayerProvider";
-import type { ScheduleDay } from "../types";
+import type { BroadcastState, ScheduleDay } from "../types";
 
 const STATION_NAME = "Web Rádio Conexão Jamaica";
 const DEFAULT_COVER = "/assets/cnjmradio-launcher.webp";
@@ -68,11 +68,28 @@ function cleanText(value: string) {
     .trim();
 }
 
-function headerStatusLabel(isPlaying: boolean, isBuffering: boolean, isOnline: boolean, error: string | null) {
-  if (!isPlaying && !isBuffering) return "Aguardando conexão";
-  if (error || !isOnline) return "Fora do ar";
-  if (isBuffering) return "Aguardando conexão";
-  return "AO VIVO";
+function resolveHeaderState(
+  isBuffering: boolean,
+  isOnline: boolean,
+  error: string | null,
+  liveState: BroadcastState | undefined,
+  hasFreshData: boolean,
+): BroadcastState {
+  if (liveState === "live") return "live";
+  if (error || liveState === "offline" || !isOnline) return "offline";
+  if (isBuffering || liveState === "connecting" || !hasFreshData) return "connecting";
+  return "online";
+}
+
+function headerStatusLabel(state: BroadcastState) {
+  if (state === "live") return "AO VIVO";
+  if (state === "online") return "ONLINE";
+  if (state === "offline") return "Fora do ar";
+  return "Conectando";
+}
+
+function headerStatusClassName(state: BroadcastState) {
+  return `header-status is-${state}`;
 }
 
 function normalizeDayText(value: string) {
@@ -175,12 +192,13 @@ function findCurrentScheduleSlot(days: ScheduleDay[]) {
 }
 
 export const SiteLayout = memo(function SiteLayout() {
-  const { isPlaying, isBuffering, error, nowPlaying } = usePlayer();
+  const { isBuffering, error, nowPlaying } = usePlayer();
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const isOnline = nowPlaying.stats.isOnline !== false;
-  const status = headerStatusLabel(isPlaying, isBuffering, isOnline, error);
-  const statusClassName = status === "AO VIVO" ? "header-status is-on" : status === "Fora do ar" ? "header-status is-off" : "header-status is-waiting";
+  const statusState = resolveHeaderState(isBuffering, isOnline, error, nowPlaying.liveDj?.state, nowPlaying.ok);
+  const status = headerStatusLabel(statusState);
+  const statusClassName = headerStatusClassName(statusState);
   const onlineCount = formatCount(nowPlaying.stats.listeners);
   const visitorCount = formatCount(nowPlaying.stats.streamHits || nowPlaying.stats.peakListeners);
   const closeMobileMenu = useCallback(() => setIsMobileMenuOpen(false), []);
@@ -227,7 +245,17 @@ export const SiteLayout = memo(function SiteLayout() {
               <Menu size={20} aria-hidden="true" />
             </button>
             <span className={statusClassName}>
-              <strong>{status}</strong>
+              {statusState === "live" ? (
+                <>
+                  <span className="on-air-badge">
+                    <Radio size={13} aria-hidden="true" />
+                    NO AR
+                  </span>
+                  <strong>AO VIVO</strong>
+                </>
+              ) : (
+                <strong>{status}</strong>
+              )}
             </span>
             <span className="header-metric header-metric-online" title="Ouvintes online">
               <UsersRound size={14} />
@@ -287,11 +315,13 @@ export const RadioHomePage = memo(function RadioHomePage() {
     reconnect,
   } = usePlayer();
   const scheduleLoader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
-  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 60000);
+  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 600000);
   const currentProgram = useMemo(() => findCurrentScheduleSlot(scheduleData?.days ?? []), [scheduleData]);
-  const trackTitle = cleanText(nowPlaying.track.title || "Programação ao vivo");
-  const trackArtist = cleanText(nowPlaying.track.artist || STATION_NAME);
-  const currentProgramName = cleanText(currentProgram?.program || "Programação musical");
+  const liveDj = nowPlaying.liveDj;
+  const isLiveDj = liveDj?.isLive === true;
+  const trackTitle = cleanText((isLiveDj ? liveDj.programName : nowPlaying.track.title) || "Programação ao vivo");
+  const trackArtist = cleanText((isLiveDj ? liveDj.djName : nowPlaying.track.artist) || STATION_NAME);
+  const currentProgramName = cleanText(isLiveDj ? "Programa Ao Vivo" : currentProgram?.program || "Programação musical");
   const defaultCover = optimizedStaticImageUrl(DEFAULT_COVER, { width: 360, height: 360, quality: 84 });
   const cover = nowPlaying.track.coverUrl?.trim() || currentProgram?.logoUrl?.trim() || defaultCover;
 
@@ -393,7 +423,7 @@ function PageShell({ title, children }: { title: string; children: ReactNode }) 
 
 export function ScheduleStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
-  const { data } = useAsyncData(loader, [], 120000);
+  const { data } = useAsyncData(loader, [], 900000);
   const days = data?.days ?? [];
   const [selectedDayId, setSelectedDayId] = useState("");
   const defaultDay = useMemo(() => pickDefaultScheduleDay(days), [days]);
@@ -565,7 +595,7 @@ export function RequestsStationPage() {
 
 export function ChatStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchChatMessages(signal), []);
-  const { data } = useAsyncData(loader, [], 45000);
+  const { data } = useAsyncData(loader, [], 120000);
   const [name, setName] = useState("Ouvinte");
   const [text, setText] = useState("");
   const [localMessages, setLocalMessages] = useState<{ id: string; author: string; text: string }[]>([]);
@@ -622,7 +652,7 @@ export function ChatStationPage() {
 
 export function CameraStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchCamera(signal), []);
-  const { data: camera } = useAsyncData(loader, [], 120000);
+  const { data: camera } = useAsyncData(loader, [], 1800000);
 
   return (
     <PageShell title="Estúdio ao vivo">

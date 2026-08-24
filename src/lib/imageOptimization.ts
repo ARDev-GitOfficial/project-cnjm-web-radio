@@ -13,6 +13,7 @@ function canUseNetlifyImageCdn() {
 
 export function optimizedStaticImageUrl(src: string, options: ImageOptions) {
   if (!src || src.startsWith("data:") || src.startsWith("blob:") || !canUseNetlifyImageCdn()) return src;
+  if (src.startsWith("/assets/") && /\.(?:avif|webp)$/i.test(src)) return src;
 
   const sourceUrl = src.startsWith("http://") || src.startsWith("https://") ? src : new URL(src, window.location.origin).href;
   const params = new URLSearchParams({

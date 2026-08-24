@@ -5,9 +5,12 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 export const AD_BANNER_WIDTH = 1700;
 export const AD_BANNER_HEIGHT = 450;
 const MAX_ADS = 100;
+const MAX_DJS = 100;
 const PROGRAM_LOGO_MAX_SIZE = 2_500_000;
 const PROGRAM_LOGO_MAX_DIMENSION = 1800;
 const ADS_BLOB_STORE = "cnjm-ad-images";
+const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
+const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
 const IMAGE_CONTENT_TYPES = new Set(["image/png", "image/webp"]);
 const ADMIN_LOGIN = process.env.CNJM_ADS_ADMIN_LOGIN || "AdminRoots";
 const DEFAULT_ADMIN_PASSWORD_HASH = "3365305e71f599bc6859e66c1c02d2f1e546010adc10f02e3b3364ebf1241b33";
@@ -27,6 +30,8 @@ const DAY_LABELS = {
   Fri: "Sexta",
   Sat: "Sábado",
 };
+
+let publicDataMemoryCache = null;
 
 function db() {
   return getDatabase().sql;
@@ -64,6 +69,47 @@ function adImageStore() {
     }
 
     throw error;
+  }
+}
+
+async function readPublicDataCache() {
+  if (
+    publicDataMemoryCache?.data &&
+    Date.now() - publicDataMemoryCache.savedAt < PUBLIC_DATA_MEMORY_TTL_MS
+  ) {
+    return publicDataMemoryCache.data;
+  }
+
+  try {
+    const cache = await adImageStore().get(PUBLIC_DATA_CACHE_KEY, { type: "json" });
+    if (!cache || typeof cache !== "object") return null;
+
+    publicDataMemoryCache = {
+      data: cache,
+      savedAt: Date.now(),
+    };
+    return cache;
+  } catch {
+    return null;
+  }
+}
+
+async function writePublicDataCache(payload) {
+  const cachePayload = {
+    version: 1,
+    cachedAt: new Date().toISOString(),
+    ...payload,
+  };
+
+  publicDataMemoryCache = {
+    data: cachePayload,
+    savedAt: Date.now(),
+  };
+
+  try {
+    await adImageStore().setJSON(PUBLIC_DATA_CACHE_KEY, cachePayload);
+  } catch {
+    // Public reads can fall back to the database if the lightweight cache is unavailable.
   }
 }
 
@@ -181,6 +227,24 @@ export function normalizeProgramPayload(program = {}) {
   };
 }
 
+export function normalizeDjPayload(dj = {}) {
+  const now = new Date();
+  const signatures = Array.isArray(dj.signatures)
+    ? dj.signatures.join("\n")
+    : String(dj.signatures || "");
+
+  return {
+    id: String(dj.id || randomUUID()),
+    signatures: normalizeDjSignatures(signatures).join("\n"),
+    djName: String(dj.djName || "").trim(),
+    programName: String(dj.programName || "").trim(),
+    active: dj.active !== false,
+    sortOrder: Number.isFinite(Number(dj.sortOrder)) ? Number(dj.sortOrder) : 0,
+    createdAt: normalizeIso(dj.createdAt) || now,
+    updatedAt: now,
+  };
+}
+
 function serializeAd(row) {
   return {
     id: row.id,
@@ -238,7 +302,29 @@ function serializeProgram(row) {
   };
 }
 
-export async function listPublicAds() {
+function serializeDj(row) {
+  return {
+    id: row.id,
+    signatures: normalizeDjSignatures(row.signatures || "").join("\n"),
+    djName: row.djName || "",
+    programName: row.programName || "",
+    active: Boolean(row.active),
+    sortOrder: Number(row.sortOrder || 0),
+    createdAt: iso(row.createdAt) || new Date().toISOString(),
+    updatedAt: iso(row.updatedAt) || new Date().toISOString(),
+  };
+}
+
+function normalizeDjSignatures(value) {
+  return String(value || "")
+    .split(/[\n,;]+/)
+    .map((signature) => signature.trim())
+    .filter(Boolean)
+    .filter((signature, index, list) => list.indexOf(signature) === index)
+    .slice(0, 12);
+}
+
+async function queryPublicAdsFromDb() {
   const database = db();
   const now = new Date();
   const [settings, ads] = await Promise.all([
@@ -279,6 +365,46 @@ export async function listPublicAds() {
     ads: ads.map(serializeAd),
     settings,
   };
+}
+
+function adsFromPublicCache(cache) {
+  if (!Array.isArray(cache?.ads)) return null;
+
+  return {
+    ads: cache.ads.map(serializeAd).slice(0, MAX_ADS),
+    settings: serializeSettings(cache.settings),
+  };
+}
+
+async function refreshPublicDataCache() {
+  const [adsData, programsData, djs] = await Promise.all([
+    queryPublicAdsFromDb(),
+    queryPublicProgramsFromDb(),
+    queryPublicDjsFromDb(),
+  ]);
+  await writePublicDataCache({
+    ads: adsData.ads,
+    settings: adsData.settings,
+    programs: programsData.programs,
+    djs,
+  });
+  return { adsData, programsData, djs };
+}
+
+async function refreshPublicDataCacheBestEffort() {
+  try {
+    await refreshPublicDataCache();
+  } catch {
+    // Admin writes should still succeed if cache refresh fails.
+  }
+}
+
+export async function listPublicAds() {
+  const cached = adsFromPublicCache(await readPublicDataCache());
+  if (cached) return cached;
+
+  const { adsData } = await refreshPublicDataCache();
+  return adsData;
 }
 
 export async function listAdminAds() {
@@ -393,7 +519,9 @@ export async function saveAdSettings(payload) {
       program_runs AS "programRuns"
   `;
 
-  return serializeSettings(settings);
+  const serialized = serializeSettings(settings);
+  await refreshPublicDataCacheBestEffort();
+  return serialized;
 }
 
 export async function saveAd(payload) {
@@ -498,7 +626,9 @@ export async function saveAd(payload) {
     await deleteStoredImage(currentAd.imageKey);
   }
 
-  return serializeAd(ad);
+  const serialized = serializeAd(ad);
+  await refreshPublicDataCacheBestEffort();
+  return serialized;
 }
 
 export async function deleteAd(id) {
@@ -531,6 +661,7 @@ export async function deleteAd(id) {
   if (ad?.imageKey) {
     await deleteStoredImage(ad.imageKey);
   }
+  await refreshPublicDataCacheBestEffort();
   return ad ? serializeAd(ad) : null;
 }
 
@@ -599,7 +730,7 @@ export async function updateAdStats(id, field) {
   return ad ? serializeAd(ad) : null;
 }
 
-export async function listPublicPrograms() {
+async function queryPublicProgramsFromDb() {
   await ensureDefaultPrograms();
   const programs = await db()`
     SELECT
@@ -629,6 +760,61 @@ export async function listPublicPrograms() {
   };
 }
 
+function programsFromPublicCache(cache) {
+  if (!Array.isArray(cache?.programs)) return null;
+
+  const serialized = cache.programs.map(serializeProgram).sort(sortPrograms);
+  return {
+    programs: serialized,
+    days: programsToScheduleDays(serialized),
+    currentProgram: currentProgramFromPrograms(serialized),
+  };
+}
+
+export async function listPublicPrograms() {
+  const cached = programsFromPublicCache(await readPublicDataCache());
+  if (cached) return cached;
+
+  const { programsData } = await refreshPublicDataCache();
+  return programsData;
+}
+
+async function queryPublicDjsFromDb() {
+  try {
+    const djs = await db()`
+      SELECT
+        id,
+        signatures,
+        dj_name AS "djName",
+        program_name AS "programName",
+        active,
+        sort_order AS "sortOrder",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM station_djs
+      WHERE active = TRUE
+      ORDER BY sort_order ASC, updated_at DESC
+      LIMIT ${MAX_DJS}
+    `;
+    return djs.map(serializeDj);
+  } catch {
+    return [];
+  }
+}
+
+function djsFromPublicCache(cache) {
+  if (!Array.isArray(cache?.djs)) return null;
+  return cache.djs.map(serializeDj).slice(0, MAX_DJS);
+}
+
+export async function listPublicDjs() {
+  const cached = djsFromPublicCache(await readPublicDataCache());
+  if (cached) return cached;
+
+  const { djs } = await refreshPublicDataCache();
+  return djs;
+}
+
 export async function listAdminPrograms() {
   await ensureDefaultPrograms();
   const programs = await db()`
@@ -656,6 +842,97 @@ export async function listAdminPrograms() {
     days: programsToScheduleDays(serialized),
     currentProgram: currentProgramFromPrograms(serialized),
   };
+}
+
+export async function listAdminDjs() {
+  try {
+    const djs = await db()`
+      SELECT
+        id,
+        signatures,
+        dj_name AS "djName",
+        program_name AS "programName",
+        active,
+        sort_order AS "sortOrder",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM station_djs
+      ORDER BY sort_order ASC, updated_at DESC
+      LIMIT ${MAX_DJS}
+    `;
+    return djs.map(serializeDj);
+  } catch {
+    return [];
+  }
+}
+
+export async function saveDj(payload) {
+  const normalized = normalizeDjPayload(payload);
+  if (!normalized.djName) throw new Error("Informe o nome público do DJ.");
+  if (!normalized.programName) throw new Error("Informe o nome do programa ao vivo.");
+  if (!normalized.signatures) throw new Error("Cadastre pelo menos uma assinatura de login.");
+
+  const [dj] = await db()`
+    INSERT INTO station_djs (
+      id,
+      signatures,
+      dj_name,
+      program_name,
+      active,
+      sort_order,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      ${normalized.id},
+      ${normalized.signatures},
+      ${normalized.djName},
+      ${normalized.programName},
+      ${normalized.active},
+      ${normalized.sortOrder},
+      ${normalized.createdAt},
+      ${normalized.updatedAt}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      signatures = EXCLUDED.signatures,
+      dj_name = EXCLUDED.dj_name,
+      program_name = EXCLUDED.program_name,
+      active = EXCLUDED.active,
+      sort_order = EXCLUDED.sort_order,
+      updated_at = EXCLUDED.updated_at
+    RETURNING
+      id,
+      signatures,
+      dj_name AS "djName",
+      program_name AS "programName",
+      active,
+      sort_order AS "sortOrder",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt"
+  `;
+
+  const serialized = serializeDj(dj);
+  await refreshPublicDataCacheBestEffort();
+  return serialized;
+}
+
+export async function deleteDj(id) {
+  const [dj] = await db()`
+    DELETE FROM station_djs
+    WHERE id = ${String(id)}
+    RETURNING
+      id,
+      signatures,
+      dj_name AS "djName",
+      program_name AS "programName",
+      active,
+      sort_order AS "sortOrder",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt"
+  `;
+
+  await refreshPublicDataCacheBestEffort();
+  return dj ? serializeDj(dj) : null;
 }
 
 export async function saveProgram(payload) {
@@ -732,7 +1009,9 @@ export async function saveProgram(payload) {
     await deleteStoredImage(currentProgram.logoKey);
   }
 
-  return serializeProgram(program);
+  const serialized = serializeProgram(program);
+  await refreshPublicDataCacheBestEffort();
+  return serialized;
 }
 
 export async function deleteProgram(id) {
@@ -758,6 +1037,7 @@ export async function deleteProgram(id) {
     await deleteStoredImage(program.logoKey);
   }
 
+  await refreshPublicDataCacheBestEffort();
   return program ? serializeProgram(program) : null;
 }
 

@@ -17,6 +17,19 @@ export type StreamStats = {
   bitrate: string;
   isOnline: boolean;
   uptimeSeconds: number | null;
+  streamSource?: string | null;
+};
+
+export type BroadcastState = "online" | "connecting" | "offline" | "live";
+
+export type LiveDjStatus = {
+  state: BroadcastState;
+  isLive: boolean;
+  djName: string | null;
+  programName: string | null;
+  matchedSignature?: string | null;
+  detectedValue?: string | null;
+  source: "autodj" | "dj" | "test" | "fallback";
 };
 
 export type HistoryItem = {
@@ -33,6 +46,7 @@ export type NowPlayingResponse = {
   source: DataSource;
   track: Track;
   stats: StreamStats;
+  liveDj: LiveDjStatus;
   history: HistoryItem[];
   fetchedAt: string;
   message?: string;

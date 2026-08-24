@@ -10,6 +10,7 @@ import {
 } from "react";
 import { fallbackNowPlaying } from "../data/fallbacks";
 import { fetchNowPlaying } from "../lib/api";
+import { applyLiveStatusTest, readLiveStatusTest, type LiveStatusTestPayload } from "../lib/liveDjs";
 import type { NowPlayingResponse } from "../types";
 
 type PlayerContextValue = {
@@ -38,6 +39,7 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
+const NOW_PLAYING_REFRESH_MS = 60_000;
 
 type BrowserAudioContext = typeof AudioContext;
 
@@ -55,6 +57,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const filtersRef = useRef<BiquadFilterNode[] | null>(null);
+  const lastNowPlayingRefreshRef = useRef(0);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -75,20 +78,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   });
   const [nowPlaying, setNowPlaying] = useState<NowPlayingResponse>(() => fallbackNowPlaying());
+  const [liveStatusTest, setLiveStatusTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
 
   const refreshNowPlaying = useCallback(async () => {
     const data = await fetchNowPlaying();
-    setNowPlaying(data);
+    setNowPlaying(applyLiveStatusTest(data, readLiveStatusTest()));
+    lastNowPlayingRefreshRef.current = Date.now();
+  }, []);
+
+  useEffect(() => {
+    const updateTest = () => {
+      const nextTest = readLiveStatusTest();
+      setLiveStatusTest(nextTest);
+      setNowPlaying((current) => applyLiveStatusTest(current, nextTest));
+    };
+
+    window.addEventListener("storage", updateTest);
+    window.addEventListener("cnjm-live-status-test", updateTest);
+    return () => {
+      window.removeEventListener("storage", updateTest);
+      window.removeEventListener("cnjm-live-status-test", updateTest);
+    };
   }, []);
 
   useEffect(() => {
     void refreshNowPlaying();
 
     const refreshWhenVisible = () => {
-      if (!document.hidden) void refreshNowPlaying();
+      if (!document.hidden && Date.now() - lastNowPlayingRefreshRef.current >= NOW_PLAYING_REFRESH_MS) {
+        void refreshNowPlaying();
+      }
     };
 
-    const timer = window.setInterval(refreshWhenVisible, 30000);
+    const timer = window.setInterval(refreshWhenVisible, NOW_PLAYING_REFRESH_MS);
     document.addEventListener("visibilitychange", refreshWhenVisible);
 
     return () => {
@@ -295,6 +317,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       isBuffering,
       isPlaying,
       nowPlaying,
+      liveStatusTest,
       pause,
       play,
       reconnect,

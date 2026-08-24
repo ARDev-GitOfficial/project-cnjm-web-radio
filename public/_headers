@@ -4,3 +4,12 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+/app-policy.json
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+/site.webmanifest
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/sitemap.xml
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400

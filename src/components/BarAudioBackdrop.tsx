@@ -28,15 +28,20 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     if (!canvas || !context) return undefined;
 
     let animationId: number | null = null;
+    let resizeFrameId: number | null = null;
     let lastFrameTime = 0;
     const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
     const coarseQuery = window.matchMedia("(pointer: coarse)");
     let isHidden = document.hidden;
+    let isCanvasVisible = true;
     let isReducedMotion = motionQuery.matches;
     let isCoarsePointer = coarseQuery.matches;
-    let frameInterval = 1000 / (isReducedMotion ? 16 : window.innerWidth < 768 ? 30 : 60);
+    let targetFps = isReducedMotion ? 30 : 60;
+    let overloadFrames = 0;
+    let recoveryFrames = 0;
 
     let bins = new Uint8Array(64);
+    const syntheticBins = new Uint8Array(48);
     let easedBars = new Float32Array(112);
     let bassEnvelope = 0;
     let guitarEnvelope = 0;
@@ -51,46 +56,89 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       tone: index % 3,
     }));
 
+    const targetFrameInterval = () => 1000 / targetFps;
+
+    const resetAdaptiveRate = () => {
+      targetFps = isReducedMotion ? 30 : 60;
+      overloadFrames = 0;
+      recoveryFrames = 0;
+    };
+
+    const updateAdaptiveRate = (renderCost: number, deltaTime: number) => {
+      if (isReducedMotion) {
+        resetAdaptiveRate();
+        return;
+      }
+
+      if (targetFps === 60) {
+        const isOverloaded = renderCost > 13 || deltaTime > 25;
+        overloadFrames = isOverloaded ? overloadFrames + 1 : Math.max(0, overloadFrames - 1);
+        if (overloadFrames >= 10) {
+          targetFps = 30;
+          overloadFrames = 0;
+          recoveryFrames = 0;
+        }
+        return;
+      }
+
+      recoveryFrames = renderCost < 10 ? recoveryFrames + 1 : 0;
+      if (recoveryFrames >= 120) {
+        targetFps = 60;
+        overloadFrames = 0;
+        recoveryFrames = 0;
+      }
+    };
+
     const resize = () => {
-      const maxPixelRatio = isReducedMotion ? 1 : 1.5;
+      const maxPixelRatio = isReducedMotion ? 1 : isCoarsePointer ? 1.12 : 1.35;
       const pixelRatio = Math.min(window.devicePixelRatio || 1, maxPixelRatio);
       const rect = canvas.getBoundingClientRect();
       canvas.width = Math.max(1, Math.floor(rect.width * pixelRatio));
       canvas.height = Math.max(1, Math.floor(rect.height * pixelRatio));
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      frameInterval = 1000 / (isReducedMotion ? 16 : window.innerWidth < 768 ? 30 : 60);
+    };
+
+    const requestResize = () => {
+      if (resizeFrameId !== null) return;
+      resizeFrameId = window.requestAnimationFrame(() => {
+        resizeFrameId = null;
+        resize();
+      });
     };
 
     const updateMotionPreferences = () => {
       isReducedMotion = motionQuery.matches;
       isCoarsePointer = coarseQuery.matches;
+      resetAdaptiveRate();
       resize();
     };
 
     const updateVisibility = () => {
       isHidden = document.hidden;
       lastFrameTime = performance.now();
-      if (!isHidden) requestFrame();
+      if (!isHidden && isCanvasVisible) requestFrame();
     };
 
     const requestFrame = () => {
-      if (animationId !== null) return;
+      if (animationId !== null || isHidden || !isCanvasVisible) return;
       animationId = window.requestAnimationFrame(render);
     };
 
     const render = (time: number) => {
       animationId = null;
 
-      if (isHidden) {
+      if (isHidden || !isCanvasVisible) {
         return;
       }
 
       const deltaTime = time - lastFrameTime;
+      const frameInterval = targetFrameInterval();
       if (deltaTime < frameInterval) {
         requestFrame();
         return;
       }
       lastFrameTime = time - (deltaTime % frameInterval);
+      const renderStart = performance.now();
 
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
@@ -107,11 +155,12 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         if (bins.length !== analyserNode.frequencyBinCount) bins = new Uint8Array(analyserNode.frequencyBinCount);
         analyserNode.getByteFrequencyData(bins);
       } else {
-        bins = Uint8Array.from({ length: 48 }, (_, index) => {
+        for (let index = 0; index < syntheticBins.length; index += 1) {
           const wave = Math.sin(loopAngle * 3 + index * 0.32) * 0.5 + 0.5;
           const pulse = Math.sin(loopAngle + index * 0.09) * 0.5 + 0.5;
-          return Math.round((wave * 0.45 + pulse * 0.22 + 0.18) * 255);
-        });
+          syntheticBins[index] = Math.round((wave * 0.45 + pulse * 0.22 + 0.18) * 255);
+        }
+        bins = syntheticBins;
       }
 
       const bass = average(bins, 0, Math.floor(bins.length * 0.22));
@@ -128,7 +177,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       const beat = playingRef.current ? Math.min(1, kick * 0.62 + mid * 0.28 + high * 0.12) : 0.16;
       const preferredPitch = isReducedMotion ? (width < 560 ? 24 : 26) : width < 560 ? 16 : width < 920 ? 18 : 20;
       const minBarWidth = width < 560 ? 4 : width < 920 ? 5 : 6;
-      const maxBars = isReducedMotion ? 34 : 60;
+      const maxBars = isReducedMotion ? 34 : isCoarsePointer ? 40 : 60;
       const barCount = Math.max(20, Math.min(maxBars, Math.floor(width / preferredPitch)));
       if (easedBars.length !== barCount) easedBars = new Float32Array(barCount);
       const pitch = width / barCount;
@@ -153,7 +202,16 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       context.fillStyle = sweep;
       context.fillRect(0, 0, width, height);
 
-      const showShadows = !isReducedMotion && width > 768;
+      const barGradient = context.createLinearGradient(0, baselineY - height * 0.54, 0, baselineY + height * 0.1);
+      barGradient.addColorStop(0, "rgba(47, 232, 138, 0.72)");
+      barGradient.addColorStop(0.52, "rgba(243, 203, 79, 0.6)");
+      barGradient.addColorStop(1, "rgba(255, 247, 201, 0.16)");
+
+      const glowGradient = context.createLinearGradient(0, baselineY - height * 0.5, 0, baselineY);
+      glowGradient.addColorStop(0, "rgba(47, 232, 138, 0.18)");
+      glowGradient.addColorStop(0.62, "rgba(243, 203, 79, 0.14)");
+      glowGradient.addColorStop(1, "rgba(255, 247, 201, 0.03)");
+      const showGlow = !isReducedMotion && !isCoarsePointer && width > 768;
 
       for (let index = 0; index < barCount; index += 1) {
         const bin = bins[Math.floor(index / barCount * bins.length)] ?? 0;
@@ -176,25 +234,26 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         const ease = isReducedMotion
           ? 0.032
           : playingRef.current
-            ? (isRising ? 0.066 + regionalEnergy * 0.05 : 0.082 + sideWeight * 0.018)
+            ? (isRising ? 0.084 + regionalEnergy * 0.055 : 0.096 + sideWeight * 0.02)
             : 0.034;
         easedBars[index] += (target - easedBars[index]) * ease;
         const power = Math.max(0.08, easedBars[index]);
         const barHeight = Math.max(28, power * height * 0.48);
         const x = startX + index * (barWidth + gap);
         const y = baselineY - barHeight;
-        const gradient = context.createLinearGradient(0, y, 0, y + barHeight);
-        gradient.addColorStop(0, `rgba(47, 232, 138, ${0.14 + power * 0.46})`);
-        gradient.addColorStop(0.52, `rgba(243, 203, 79, ${0.11 + power * 0.42})`);
-        gradient.addColorStop(1, `rgba(255, 247, 201, ${0.035 + power * 0.12})`);
 
-        context.fillStyle = gradient;
-        if (showShadows) {
-          context.shadowColor = index % 2 === 0 ? "rgba(47, 232, 138, 0.12)" : "rgba(243, 203, 79, 0.11)";
-          context.shadowBlur = 4 + beat * 5;
+        if (showGlow && power > 0.34 && index % 2 === 0) {
+          context.globalAlpha = Math.min(0.34, 0.08 + power * 0.18 + beat * 0.08);
+          context.fillStyle = glowGradient;
+          roundRect(context, x - gap, y - 3, barWidth + gap * 2, barHeight + 7, Math.min(10, barWidth));
+          context.fill();
         }
+
+        context.globalAlpha = Math.min(1, 0.48 + power * 0.46);
+        context.fillStyle = barGradient;
         roundRect(context, x, y, barWidth, barHeight, Math.min(8, barWidth));
         context.fill();
+        context.globalAlpha = 1;
 
         if (width > 480) {
           context.fillStyle = `rgba(243, 203, 79, ${0.03 + power * 0.06})`;
@@ -204,7 +263,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       }
 
       context.shadowBlur = 0;
-      const visibleParticleCount = isReducedMotion ? 0 : width < 768 || isCoarsePointer ? 24 : 64;
+      const visibleParticleCount = isReducedMotion ? 0 : width < 768 || isCoarsePointer ? 24 : 48;
       for (let particleIndex = 0; particleIndex < visibleParticleCount; particleIndex += 1) {
         const particle = particles[particleIndex];
         if (!particle) continue;
@@ -231,19 +290,31 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         }
       }
 
+      updateAdaptiveRate(performance.now() - renderStart, deltaTime);
       requestFrame();
     };
 
     resize();
-    window.addEventListener("resize", resize, { passive: true });
+    const observer = "IntersectionObserver" in window
+      ? new IntersectionObserver(([entry]) => {
+          isCanvasVisible = Boolean(entry?.isIntersecting);
+          if (isCanvasVisible) requestFrame();
+        }, { threshold: 0.04 })
+      : null;
+
+    observer?.observe(canvas);
+    window.addEventListener("resize", requestResize, { passive: true });
     document.addEventListener("visibilitychange", updateVisibility);
     motionQuery.addEventListener("change", updateMotionPreferences);
     coarseQuery.addEventListener("change", updateMotionPreferences);
+    lastFrameTime = performance.now();
     requestFrame();
 
     return () => {
       if (animationId !== null) window.cancelAnimationFrame(animationId);
-      window.removeEventListener("resize", resize);
+      if (resizeFrameId !== null) window.cancelAnimationFrame(resizeFrameId);
+      observer?.disconnect();
+      window.removeEventListener("resize", requestResize);
       document.removeEventListener("visibilitychange", updateVisibility);
       motionQuery.removeEventListener("change", updateMotionPreferences);
       coarseQuery.removeEventListener("change", updateMotionPreferences);

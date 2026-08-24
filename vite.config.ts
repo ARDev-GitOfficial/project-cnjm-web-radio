@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } from "vite";
 
 const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
+const STATISTICS_URL = "https://s03.svrdedicado.org:7586/statistics?json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
 const PUBLIC_SCHEDULE_URL = "https://webradioconexaojamaica.com/api/schedule";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
@@ -24,6 +25,9 @@ type StatsPayload = {
   streamstatus?: number;
   streamuptime?: number;
   bitrate?: string;
+  streamsource?: string;
+  source?: string;
+  streams?: StatsPayload[];
 };
 
 const dayOrder = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -93,6 +97,19 @@ async function fetchJson<T>(url: string) {
   }
 
   return (await response.json()) as T;
+}
+
+function normalizeStreamStatsPayload(payload: StatsPayload) {
+  if (Array.isArray(payload?.streams) && payload.streams[0]) return payload.streams[0];
+  return payload || {};
+}
+
+async function fetchStreamStats() {
+  try {
+    return normalizeStreamStatsPayload(await fetchJson<StatsPayload>(STATISTICS_URL));
+  } catch {
+    return normalizeStreamStatsPayload(await fetchJson<StatsPayload>(STATS_URL));
+  }
 }
 
 function decodeHtml(value: string) {
@@ -358,7 +375,7 @@ function parseChatMessages(html: string) {
 async function handleNowPlaying(res: ResponseLike) {
   try {
     const [stats, historyHtml, coverUrl] = await Promise.all([
-      fetchJson<StatsPayload>(STATS_URL),
+      fetchStreamStats(),
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
     ]);
@@ -367,6 +384,7 @@ async function handleNowPlaying(res: ResponseLike) {
       coverUrl,
     };
     const history = parseHistory(historyHtml);
+    const isOnline = Number(stats.streamstatus ?? 0) === 1;
 
     json(res, 200, {
       ok: true,
@@ -379,8 +397,18 @@ async function handleNowPlaying(res: ResponseLike) {
         streamHits: Number(stats.streamhits ?? 0),
         genre: stats.servergenre ?? "Reggae",
         bitrate: stats.bitrate ?? "128",
-        isOnline: Number(stats.streamstatus ?? 0) === 1,
+        isOnline,
         uptimeSeconds: Number(stats.streamuptime ?? 0) || null,
+        streamSource: stats.streamsource ?? stats.source ?? null,
+      },
+      liveDj: {
+        state: isOnline ? "online" : "offline",
+        isLive: false,
+        djName: null,
+        programName: null,
+        matchedSignature: null,
+        detectedValue: stats.streamsource ?? stats.source ?? null,
+        source: "autodj",
       },
       history: history.length > 0 ? history : safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
@@ -402,6 +430,16 @@ async function handleNowPlaying(res: ResponseLike) {
         bitrate: "128",
         isOnline: true,
         uptimeSeconds: null,
+        streamSource: null,
+      },
+      liveDj: {
+        state: "connecting",
+        isLive: false,
+        djName: null,
+        programName: null,
+        matchedSignature: null,
+        detectedValue: null,
+        source: "fallback",
       },
       history: safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),

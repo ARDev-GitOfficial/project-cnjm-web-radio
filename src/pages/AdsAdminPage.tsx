@@ -15,6 +15,7 @@ import {
   Lock,
   LogOut,
   Megaphone,
+  Mic2,
   Plus,
   RefreshCw,
   Save,
@@ -64,6 +65,22 @@ import {
   type ProgramsPayload,
   type StationProgram,
 } from "../lib/programs";
+import {
+  deleteRemoteDj,
+  emptyDj,
+  fetchAdminDjs,
+  loadDjs,
+  localDjsPayload,
+  nextLiveStatusTest,
+  normalizeDj,
+  readLiveStatusTest,
+  saveDjs,
+  saveRemoteDj,
+  writeLiveStatusTest,
+  type DjsPayload,
+  type LiveStatusTestPayload,
+  type StationDj,
+} from "../lib/liveDjs";
 
 type LoginForm = {
   login: string;
@@ -80,12 +97,13 @@ type ConversionState = UploadState & {
   total: number;
 };
 
-type AdminPanel = "dashboard" | "ads" | "programs";
+type AdminPanel = "dashboard" | "ads" | "programs" | "djs";
 
 const adminPanelRoutes: Record<AdminPanel, string> = {
   dashboard: "/ads/dashboard",
   ads: "/ads/anuncios",
   programs: "/ads/programacao",
+  djs: "/ads/djs",
 };
 
 const localAdminPayload = (message?: string): AdsPayload => ({
@@ -98,11 +116,14 @@ const localAdminPayload = (message?: string): AdsPayload => ({
 
 const localProgramPayload = (message?: string): ProgramsPayload => localProgramsPayload(message);
 
+const localDjPayload = (message?: string): DjsPayload => localDjsPayload(message);
+
 function panelFromPath(pathname: string): AdminPanel | null {
   const cleanPath = pathname.replace(/\/+$/, "");
   if (cleanPath === "/ads" || cleanPath === "/ads/dashboard") return "dashboard";
   if (cleanPath === "/ads/anuncios") return "ads";
   if (cleanPath === "/ads/programacao") return "programs";
+  if (cleanPath === "/ads/djs") return "djs";
   return null;
 }
 
@@ -126,6 +147,9 @@ export function AdsAdminPage() {
   const [actionMessage, setActionMessage] = useState("");
   const [programDraft, setProgramDraft] = useState<StationProgram>(() => emptyProgram());
   const [selectedProgramId, setSelectedProgramId] = useState("");
+  const [djDraft, setDjDraft] = useState<StationDj>(() => emptyDj());
+  const [selectedDjId, setSelectedDjId] = useState("");
+  const [liveTest, setLiveTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
     enabled: Boolean(session),
@@ -164,11 +188,31 @@ export function AdsAdminPage() {
       }
     },
   });
+  const { data: djData, isFetching: isFetchingDjs } = useQuery({
+    queryKey: ["djs-admin", session?.token, session?.source],
+    enabled: Boolean(session),
+    queryFn: async ({ signal }) => {
+      if (!session) return localDjPayload();
+      if (session.source === "local") {
+        return canUseLocalFallback()
+          ? localDjPayload()
+          : localDjPayload("Sessão local não é permitida no site publicado.");
+      }
+
+      try {
+        return await fetchAdminDjs(session.token, signal);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Banco global indisponível.";
+        return canUseLocalFallback() ? localDjPayload(message) : localDjPayload(message);
+      }
+    },
+  });
 
   const ads = data?.ads ?? [];
   const settings = data?.settings ?? loadAdSettings();
   const programs = programData?.programs ?? loadPrograms();
   const currentProgram = programData?.currentProgram;
+  const djs = djData?.djs ?? loadDjs();
   const isRemote = Boolean(session && data?.source === "database");
   const isLocalMode = Boolean(session && data?.source === "local");
   const isDisconnected = Boolean(session && data?.source === "fallback");
@@ -181,6 +225,7 @@ export function AdsAdminPage() {
   const activeCount = useMemo(() => ads.filter((ad) => ad.active).length, [ads]);
   const webpMigrationAds = useMemo(() => ads.filter(needsWebpMigration), [ads]);
   const activeProgramCount = useMemo(() => programs.filter((program) => program.active).length, [programs]);
+  const activeDjCount = useMemo(() => djs.filter((dj) => dj.active).length, [djs]);
   const totalImpressions = useMemo(() => ads.reduce((total, ad) => total + ad.impressions, 0), [ads]);
   const totalClicks = useMemo(() => ads.reduce((total, ad) => total + ad.clicks, 0), [ads]);
   const activePanel = panelFromPath(location.pathname);
@@ -204,12 +249,17 @@ export function AdsAdminPage() {
     setLoginForm({ login: "", password: "" });
     setDraft(emptyAd());
     setSelectedId("");
+    setProgramDraft(emptyProgram());
+    setSelectedProgramId("");
+    setDjDraft(emptyDj());
+    setSelectedDjId("");
   };
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["ads-admin"] });
     void queryClient.invalidateQueries({ queryKey: ["public-ads"] });
     void queryClient.invalidateQueries({ queryKey: ["programs-admin"] });
+    void queryClient.invalidateQueries({ queryKey: ["djs-admin"] });
   };
 
   const persistLocalAds = (nextAds: SiteAd[]) => {
@@ -219,6 +269,11 @@ export function AdsAdminPage() {
 
   const persistLocalPrograms = (nextPrograms: StationProgram[]) => {
     savePrograms(nextPrograms);
+    refresh();
+  };
+
+  const persistLocalDjs = (nextDjs: StationDj[]) => {
+    saveDjs(nextDjs);
     refresh();
   };
 
@@ -598,6 +653,99 @@ export function AdsAdminPage() {
     }
   };
 
+  const editDj = (dj: StationDj) => {
+    setDjDraft(dj);
+    setSelectedDjId(dj.id);
+    setActionMessage("");
+  };
+
+  const newDj = () => {
+    const fresh = emptyDj();
+    setDjDraft(fresh);
+    setSelectedDjId("");
+    setActionMessage("");
+  };
+
+  const saveDjDraft = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalized = normalizeDj({ ...djDraft, updatedAt: new Date().toISOString() });
+    if (!canEditAds) {
+      setActionMessage("Conecte o banco global antes de salvar DJs.");
+      return;
+    }
+    if (!normalized.signatures || !normalized.djName || !normalized.programName) {
+      setActionMessage("Informe assinatura, nome público do DJ e nome do programa.");
+      return;
+    }
+
+    try {
+      if (isRemote && session) {
+        const saved = await saveRemoteDj(session.token, normalized);
+        setDjDraft(saved);
+        setSelectedDjId(saved.id);
+      } else {
+        const exists = djs.some((dj) => dj.id === normalized.id);
+        const nextDjs = exists ? djs.map((dj) => (dj.id === normalized.id ? normalized : dj)) : [normalized, ...djs];
+        persistLocalDjs(nextDjs);
+        setSelectedDjId(normalized.id);
+      }
+      setActionMessage("DJ ao vivo salvo.");
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar o DJ.");
+    }
+  };
+
+  const removeDj = async (id: string) => {
+    if (!canEditAds) {
+      setActionMessage("Conecte o banco global antes de excluir DJs.");
+      return;
+    }
+
+    try {
+      if (isRemote && session) {
+        await deleteRemoteDj(session.token, id);
+      } else {
+        persistLocalDjs(djs.filter((dj) => dj.id !== id));
+      }
+      if (selectedDjId === id) newDj();
+      setActionMessage("DJ removido.");
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível excluir o DJ.");
+    }
+  };
+
+  const toggleDj = async (dj: StationDj) => {
+    const next = normalizeDj({ ...dj, active: !dj.active, updatedAt: new Date().toISOString() });
+    try {
+      if (isRemote && session) {
+        await saveRemoteDj(session.token, next);
+      } else {
+        persistLocalDjs(djs.map((item) => (item.id === dj.id ? next : item)));
+      }
+      setActionMessage(next.active ? "DJ ativado." : "DJ desativado.");
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar o DJ.");
+    }
+  };
+
+  const cycleLiveStatusTest = () => {
+    const next = nextLiveStatusTest(liveTest, djs.find((dj) => dj.active));
+    writeLiveStatusTest(next);
+    setLiveTest(next);
+    if (next.state === "off") {
+      setActionMessage("Modo de teste desligado. A rádio voltou a usar os dados reais.");
+      return;
+    }
+    setActionMessage(
+      next.state === "live"
+        ? `Teste aplicado: NO AR com ${next.djName} / ${next.programName}.`
+        : `Teste aplicado: ${liveTestLabel(next.state)}.`,
+    );
+  };
+
   if (!session) {
     return (
       <main className="ads-admin-page login-screen">
@@ -663,7 +811,7 @@ export function AdsAdminPage() {
             {isRemote ? <Database size={15} /> : isLocalMode ? <HardDrive size={15} /> : <AlertTriangle size={15} />}
             {isRemote ? "Banco global" : isLocalMode ? "Modo local" : "Banco pendente"}
           </span>
-          <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms}>
+          <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms || isFetchingDjs}>
             <RefreshCw size={16} /> Atualizar
           </button>
           <button className="ghost-button" type="button" onClick={logout}>
@@ -696,6 +844,9 @@ export function AdsAdminPage() {
         <NavLink className={activePanel === "programs" ? "is-active" : ""} to={adminPanelRoutes.programs}>
           <CalendarDays size={16} /> Gerenciar programação
         </NavLink>
+        <NavLink className={activePanel === "djs" ? "is-active" : ""} to={adminPanelRoutes.djs}>
+          <Mic2 size={16} /> DJs ao vivo
+        </NavLink>
       </nav>
 
       {activePanel === "dashboard" ? (
@@ -725,6 +876,14 @@ export function AdsAdminPage() {
               <strong>{activeProgramCount}</strong>
               <span>programas ativos</span>
             </article>
+            <article>
+              <strong>{djs.length}</strong>
+              <span>DJs cadastrados</span>
+            </article>
+            <article>
+              <strong>{activeDjCount}</strong>
+              <span>DJs ativos</span>
+            </article>
           </section>
 
           <section className="admin-dashboard-panel">
@@ -737,6 +896,14 @@ export function AdsAdminPage() {
               <span><Megaphone size={15} /> Regra de anúncios</span>
               <strong>{settings.commercialRuns} comerciais / {settings.programRuns} programa</strong>
               <p>O site intercala anúncios comerciais e chamadas de programação sem empilhar vários banners.</p>
+            </article>
+            <article className="live-test-panel">
+              <span><Mic2 size={15} /> Teste do ao vivo</span>
+              <strong>{liveTest.state === "off" ? "Dados reais" : liveTestLabel(liveTest.state)}</strong>
+              <p>{liveTest.state === "live" ? `${liveTest.djName || "DJ ao vivo"} · ${liveTest.programName || "Programa Ao Vivo"}` : "Alterne o topo e o player para validar cores, nomes e estados antes do deploy."}</p>
+              <button className="ghost-button" type="button" onClick={cycleLiveStatusTest}>
+                <RefreshCw size={16} /> Alternar status
+              </button>
             </article>
           </section>
         </>
@@ -1246,6 +1413,130 @@ export function AdsAdminPage() {
         </section>
       ) : null}
 
+      {activePanel === "djs" ? (
+        <section className="admin-grid dj-admin-grid">
+          <form className="ad-editor" onSubmit={saveDjDraft}>
+            <div className="editor-head">
+              <div>
+                <span>{selectedDjId ? "Editando DJ" : "Novo DJ ao vivo"}</span>
+                <h2>Detecção de transmissão</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={newDj} disabled={!canEditAds}>
+                <Plus size={16} /> Novo
+              </button>
+            </div>
+
+            <label>
+              Assinaturas vindas da API
+              <textarea
+                rows={5}
+                value={djDraft.signatures}
+                onChange={(event) => setDjDraft({ ...djDraft, signatures: event.currentTarget.value })}
+                placeholder={"djleo:1234\ndjleo"}
+              />
+            </label>
+            <small>Cadastre uma assinatura por linha. O site compara esses valores com os campos do servidor de rádio.</small>
+
+            <label>
+              Nome público do DJ
+              <input
+                value={djDraft.djName}
+                onChange={(event) => setDjDraft({ ...djDraft, djName: event.currentTarget.value })}
+                placeholder="DJ Leo"
+              />
+            </label>
+            <label>
+              Programa ao vivo
+              <input
+                value={djDraft.programName}
+                onChange={(event) => setDjDraft({ ...djDraft, programName: event.currentTarget.value })}
+                placeholder="Roots Strike"
+              />
+            </label>
+            <div className="editor-columns">
+              <label>
+                Ordem
+                <input
+                  type="number"
+                  value={djDraft.sortOrder}
+                  onChange={(event) => setDjDraft({ ...djDraft, sortOrder: Number(event.currentTarget.value) || 0 })}
+                />
+              </label>
+              <label className="check-line">
+                <input
+                  type="checkbox"
+                  checked={djDraft.active}
+                  onChange={(event) => setDjDraft({ ...djDraft, active: event.currentTarget.checked })}
+                />
+                DJ ativo
+              </label>
+            </div>
+            <button className="play-main slim" type="submit" disabled={!canEditAds}>
+              <Save size={16} /> Salvar DJ
+            </button>
+          </form>
+
+          <aside className="ad-list">
+            <div className="editor-head">
+              <div>
+                <span>
+                  <Mic2 size={15} /> DJs cadastrados
+                </span>
+                <h2>Ao vivo no site</h2>
+              </div>
+              <BarChart3 size={20} />
+            </div>
+            {djs.length ? (
+              <div className="ad-grid dj-list-grid">
+                {djs.map((dj) => (
+                  <article key={dj.id} className={dj.active ? "ad-list-item dj-list-item is-active" : "ad-list-item dj-list-item"}>
+                    <span className="dj-avatar">
+                      <Mic2 size={20} />
+                    </span>
+                    <div>
+                      <strong>{dj.djName || "DJ sem nome"}</strong>
+                      <span>{dj.programName || "Programa sem nome"}</span>
+                      <small>{dj.active ? "Ativo" : "Desativado"} · {dj.signatures.split("\n").filter(Boolean).length} assinatura(s)</small>
+                    </div>
+                    <code>{dj.signatures.split("\n").filter(Boolean).join(" · ")}</code>
+                    <div className="ad-list-actions">
+                      <button type="button" onClick={() => editDj(dj)} aria-label="Editar DJ">
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void toggleDj(dj);
+                        }}
+                        disabled={!canEditAds}
+                        aria-label={dj.active ? "Desativar DJ" : "Ativar DJ"}
+                      >
+                        {dj.active ? <Eye size={15} /> : <EyeOff size={15} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void removeDj(dj.id);
+                        }}
+                        disabled={!canEditAds}
+                        aria-label="Excluir DJ"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-admin">
+                <strong>Nenhum DJ cadastrado</strong>
+                <span>Quando cadastrar um login do AutoDJ, o site poderá trocar música/artista por programa/DJ ao vivo.</span>
+              </div>
+            )}
+          </aside>
+        </section>
+      ) : null}
+
       {cropFile ? (
         <AdImageCropper
           file={cropFile}
@@ -1303,6 +1594,14 @@ function fromDateTimeInput(value: string) {
 
 function placementLabel(value: SiteAd["placement"]) {
   return value === "program" ? "Programa" : "Comercial";
+}
+
+function liveTestLabel(value: LiveStatusTestPayload["state"]) {
+  if (value === "live") return "NO AR / AO VIVO";
+  if (value === "online") return "ONLINE";
+  if (value === "connecting") return "Conectando";
+  if (value === "offline") return "Fora do ar";
+  return "Dados reais";
 }
 
 function needsWebpMigration(ad: SiteAd) {

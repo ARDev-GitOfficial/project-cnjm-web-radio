@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   BarChart3,
@@ -17,13 +18,18 @@ import {
   Megaphone,
   Mic2,
   Plus,
+  Power,
+  Radio,
   RefreshCw,
   Save,
   Settings2,
+  SlidersHorizontal,
+  TrendingUp,
   Trash2,
   UploadCloud,
+  UsersRound,
 } from "lucide-react";
-import { useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { Navigate, NavLink, useLocation } from "react-router-dom";
 import { AdImageCropper, type CroppedAdImage } from "../components/AdImageCropper";
 import {
@@ -59,6 +65,8 @@ import {
   loadPrograms,
   localProgramsPayload,
   normalizeProgram,
+  PROGRAM_LOGO_MAX_DIMENSION,
+  PROGRAM_LOGO_MAX_SIZE,
   savePrograms,
   saveRemoteProgram,
   uploadProgramLogo,
@@ -70,10 +78,20 @@ import {
   emptyDj,
   fetchAdminDjs,
   loadDjs,
+  LIVE_TEST_DEFAULT_LISTENERS,
+  LIVE_TEST_DEFAULT_LIVE_BOOST,
+  LIVE_TEST_DEFAULT_GROWTH,
+  LIVE_TEST_DEFAULT_MOVEMENT,
+  LIVE_TEST_DEFAULT_VISITORS,
+  LIVE_TEST_MAX_GROWTH_PERCENT,
+  LIVE_TEST_MAX_LISTENERS,
+  LIVE_TEST_MAX_PERCENT,
+  LIVE_TEST_MAX_VISITORS,
   localDjsPayload,
   nextLiveStatusTest,
   normalizeDj,
   readLiveStatusTest,
+  resolveLiveStatusTestMetrics,
   saveDjs,
   saveRemoteDj,
   writeLiveStatusTest,
@@ -97,14 +115,35 @@ type ConversionState = UploadState & {
   total: number;
 };
 
-type AdminPanel = "dashboard" | "ads" | "programs" | "djs";
+type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits";
+
+type LiveMetricDraft = {
+  listeners: string;
+  visitors: string;
+  movementPercent: string;
+  liveBoostPercent: string;
+  growthPercent: string;
+};
 
 const adminPanelRoutes: Record<AdminPanel, string> = {
   dashboard: "/ads/dashboard",
   ads: "/ads/anuncios",
   programs: "/ads/programacao",
   djs: "/ads/djs",
+  visits: "/ads/visitas",
 };
+
+const liveStatusOptions: Array<{
+  state: LiveStatusTestPayload["state"];
+  label: string;
+  icon: typeof Radio;
+}> = [
+  { state: "online", label: "Online", icon: Radio },
+  { state: "live", label: "Ao vivo", icon: Activity },
+  { state: "connecting", label: "Conectando", icon: RefreshCw },
+  { state: "offline", label: "Fora do ar", icon: Power },
+  { state: "off", label: "Dados reais", icon: Database },
+];
 
 const localAdminPayload = (message?: string): AdsPayload => ({
   ads: loadAds(),
@@ -124,6 +163,7 @@ function panelFromPath(pathname: string): AdminPanel | null {
   if (cleanPath === "/ads/anuncios") return "ads";
   if (cleanPath === "/ads/programacao") return "programs";
   if (cleanPath === "/ads/djs") return "djs";
+  if (cleanPath === "/ads/visitas") return "visits";
   return null;
 }
 
@@ -150,6 +190,8 @@ export function AdsAdminPage() {
   const [djDraft, setDjDraft] = useState<StationDj>(() => emptyDj());
   const [selectedDjId, setSelectedDjId] = useState("");
   const [liveTest, setLiveTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
+  const [liveMetricDraft, setLiveMetricDraft] = useState<LiveMetricDraft>(() => liveMetricDraftFromPayload(readLiveStatusTest()));
+  const [simulationNow, setSimulationNow] = useState(() => Date.now());
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
     enabled: Boolean(session),
@@ -216,6 +258,7 @@ export function AdsAdminPage() {
   const isRemote = Boolean(session && data?.source === "database");
   const isLocalMode = Boolean(session && data?.source === "local");
   const isDisconnected = Boolean(session && data?.source === "fallback");
+  const canManageLocalMetrics = Boolean(session && canUseLocalFallback());
   const canEditAds = isRemote || isLocalMode;
   const environmentNotice = isLocalMode
     ? "Ambiente local ativo para testes. Os anúncios salvos aqui ficam apenas neste navegador."
@@ -226,9 +269,31 @@ export function AdsAdminPage() {
   const webpMigrationAds = useMemo(() => ads.filter(needsWebpMigration), [ads]);
   const activeProgramCount = useMemo(() => programs.filter((program) => program.active).length, [programs]);
   const activeDjCount = useMemo(() => djs.filter((dj) => dj.active).length, [djs]);
-  const totalImpressions = useMemo(() => ads.reduce((total, ad) => total + ad.impressions, 0), [ads]);
+  const linkedAdsCount = useMemo(() => ads.filter((ad) => ad.linkUrl).length, [ads]);
   const totalClicks = useMemo(() => ads.reduce((total, ad) => total + ad.clicks, 0), [ads]);
   const activePanel = panelFromPath(location.pathname);
+  const resolvedLiveMetrics = useMemo(
+    () => resolveLiveStatusTestMetrics(liveTest, simulationNow),
+    [liveTest, simulationNow],
+  );
+  const visitWaveBars = useMemo(() => makeVisitWaveBars(liveTest, simulationNow), [liveTest, simulationNow]);
+  const isSimulationActive = liveTest.state !== "off";
+
+  useEffect(() => {
+    setLiveMetricDraft(liveMetricDraftFromPayload(liveTest));
+  }, [
+    liveTest.listeners,
+    liveTest.visitors,
+    liveTest.movementPercent,
+    liveTest.liveBoostPercent,
+    liveTest.growthPercent,
+  ]);
+
+  useEffect(() => {
+    if (liveTest.state === "off") return undefined;
+    const timer = window.setInterval(() => setSimulationNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, [liveTest.state]);
 
   const login = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -624,25 +689,37 @@ export function AdsAdminPage() {
     setProgramUploadState({ status: "checking", message: "Validando logo..." });
 
     try {
-      if (file.type !== "image/png" && file.type !== "image/webp") throw new Error("Envie uma logo PNG ou WebP.");
+      const sourceType = imageContentTypeForFile(file);
+      if (sourceType !== "image/png" && sourceType !== "image/webp") throw new Error("Envie uma logo PNG ou WebP.");
       const size = await readImageSize(file);
-      if (file.size > 2_500_000) throw new Error("A logo precisa ter até 2,5 MB.");
-      if (size.width > 1800 || size.height > 1800) throw new Error("A logo precisa ter até 1800px de largura e altura.");
+      if (file.size > PROGRAM_LOGO_MAX_SIZE) throw new Error("A logo precisa ter até 2,5 MB.");
+      if (size.width > PROGRAM_LOGO_MAX_DIMENSION || size.height > PROGRAM_LOGO_MAX_DIMENSION) {
+        throw new Error(`A logo precisa ter até ${PROGRAM_LOGO_MAX_DIMENSION}px de largura e altura.`);
+      }
 
-      const dataUrl = await readFileAsDataUrl(file);
+      if (sourceType === "image/png") {
+        setProgramUploadState({ status: "checking", message: "Convertendo PNG para WebP..." });
+      }
+
+      const logo = await prepareProgramLogoUpload(file, size, sourceType);
+      if (logo.size > PROGRAM_LOGO_MAX_SIZE) throw new Error("A logo WebP final precisa ter até 2,5 MB.");
+
       if (isRemote && session) {
         const image = await uploadProgramLogo(session.token, {
-          fileName: file.name,
-          contentType: file.type,
-          width: size.width,
-          height: size.height,
-          dataBase64: dataUrl.split(",")[1] || "",
+          fileName: logo.fileName,
+          contentType: logo.contentType,
+          width: logo.width,
+          height: logo.height,
+          dataBase64: logo.dataBase64,
         });
         setProgramDraft((current) => ({ ...current, logoUrl: image.imageUrl, logoKey: image.imageKey }));
       } else {
-        setProgramDraft((current) => ({ ...current, logoUrl: dataUrl, logoKey: file.name }));
+        setProgramDraft((current) => ({ ...current, logoUrl: logo.dataUrl, logoKey: logo.fileName }));
       }
-      setProgramUploadState({ status: "ready", message: "Logo anexada ao programa." });
+      setProgramUploadState({
+        status: "ready",
+        message: logo.converted ? "PNG convertido e logo WebP anexada ao programa." : "Logo WebP anexada ao programa.",
+      });
     } catch (error) {
       setProgramUploadState({
         status: "error",
@@ -746,6 +823,119 @@ export function AdsAdminPage() {
     );
   };
 
+  const applyLiveMetricTest = () => {
+    if (!canManageLocalMetrics) {
+      setActionMessage("Esse controle fica disponível apenas no teste local.");
+      return;
+    }
+
+    const listeners = parseLiveMetric(
+      liveMetricDraft.listeners,
+      liveTest.listeners ?? LIVE_TEST_DEFAULT_LISTENERS,
+      LIVE_TEST_MAX_LISTENERS,
+    );
+    const visitors = parseLiveMetric(
+      liveMetricDraft.visitors,
+      liveTest.visitors ?? LIVE_TEST_DEFAULT_VISITORS,
+      LIVE_TEST_MAX_VISITORS,
+    );
+    const movementPercent = parseLiveMetric(
+      liveMetricDraft.movementPercent,
+      liveTest.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT,
+      LIVE_TEST_MAX_PERCENT,
+    );
+    const liveBoostPercent = parseLiveMetric(
+      liveMetricDraft.liveBoostPercent,
+      liveTest.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST,
+      LIVE_TEST_MAX_PERCENT,
+    );
+    const growthPercent = parseLiveMetric(
+      liveMetricDraft.growthPercent,
+      liveTest.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH,
+      LIVE_TEST_MAX_GROWTH_PERCENT,
+    );
+    const next: LiveStatusTestPayload = {
+      ...liveTest,
+      state: liveTest.state === "off" ? "online" : liveTest.state,
+      listeners,
+      visitors,
+      movementPercent,
+      liveBoostPercent,
+      growthPercent,
+      seed: liveTest.seed ?? nextSimulationSeed(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    writeLiveStatusTest(next);
+    const normalized = readLiveStatusTest();
+    setLiveTest(normalized);
+    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
+    setSimulationNow(Date.now());
+    setActionMessage("Visualizações e visitas locais aplicadas no site.");
+  };
+
+  const changeLiveSimulationState = (state: LiveStatusTestPayload["state"]) => {
+    if (!canManageLocalMetrics) {
+      setActionMessage("Esse controle fica disponível apenas no teste local.");
+      return;
+    }
+
+    const next: LiveStatusTestPayload = {
+      ...liveTest,
+      state,
+      seed: liveTest.seed ?? nextSimulationSeed(),
+      updatedAt: state === "off" ? liveTest.updatedAt : new Date().toISOString(),
+    };
+
+    writeLiveStatusTest(next);
+    const normalized = readLiveStatusTest();
+    setLiveTest(normalized);
+    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
+    setSimulationNow(Date.now());
+    setActionMessage(state === "off" ? "Simulação local desligada." : `Simulação local em estado: ${liveTestLabel(state)}.`);
+  };
+
+  const shuffleLiveSimulation = () => {
+    if (!canManageLocalMetrics) {
+      setActionMessage("Esse controle fica disponível apenas no teste local.");
+      return;
+    }
+
+    const next: LiveStatusTestPayload = {
+      ...liveTest,
+      state: liveTest.state === "off" ? "online" : liveTest.state,
+      seed: nextSimulationSeed(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    writeLiveStatusTest(next);
+    const normalized = readLiveStatusTest();
+    setLiveTest(normalized);
+    setSimulationNow(Date.now());
+    setActionMessage("Nova variação local gerada.");
+  };
+
+  const resetLiveMetricTest = () => {
+    const next: LiveStatusTestPayload = {
+      ...liveTest,
+      state: "off",
+      listeners: LIVE_TEST_DEFAULT_LISTENERS,
+      visitors: LIVE_TEST_DEFAULT_VISITORS,
+      movementPercent: LIVE_TEST_DEFAULT_MOVEMENT,
+      liveBoostPercent: LIVE_TEST_DEFAULT_LIVE_BOOST,
+      growthPercent: LIVE_TEST_DEFAULT_GROWTH,
+      seed: nextSimulationSeed(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    writeLiveStatusTest(next);
+    const normalized = readLiveStatusTest();
+    setLiveTest(normalized);
+    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
+    setSimulationNow(Date.now());
+    setActionMessage("Simulação local desligada. O site voltou aos dados reais.");
+  };
+
   if (!session) {
     return (
       <main className="ads-admin-page login-screen">
@@ -847,6 +1037,9 @@ export function AdsAdminPage() {
         <NavLink className={activePanel === "djs" ? "is-active" : ""} to={adminPanelRoutes.djs}>
           <Mic2 size={16} /> DJs ao vivo
         </NavLink>
+        <NavLink className={activePanel === "visits" ? "is-active" : ""} to={adminPanelRoutes.visits}>
+          <UsersRound size={16} /> Visitas
+        </NavLink>
       </nav>
 
       {activePanel === "dashboard" ? (
@@ -861,12 +1054,12 @@ export function AdsAdminPage() {
               <span>ativos</span>
             </article>
             <article>
-              <strong>{totalImpressions}</strong>
-              <span>exibições</span>
+              <strong>{linkedAdsCount}</strong>
+              <span>flyers com link</span>
             </article>
             <article>
               <strong>{totalClicks}</strong>
-              <span>cliques</span>
+              <span>toques em links</span>
             </article>
             <article>
               <strong>{programs.length}</strong>
@@ -901,12 +1094,223 @@ export function AdsAdminPage() {
               <span><Mic2 size={15} /> Teste do ao vivo</span>
               <strong>{liveTest.state === "off" ? "Dados reais" : liveTestLabel(liveTest.state)}</strong>
               <p>{liveTest.state === "live" ? `${liveTest.djName || "DJ ao vivo"} · ${liveTest.programName || "Programa Ao Vivo"}` : "Alterne o topo e o player para validar cores, nomes e estados antes do deploy."}</p>
-              <button className="ghost-button" type="button" onClick={cycleLiveStatusTest}>
-                <RefreshCw size={16} /> Alternar status
-              </button>
+              <div className="live-test-actions">
+                <button className="ghost-button" type="button" onClick={cycleLiveStatusTest}>
+                  <RefreshCw size={16} /> Alternar status
+                </button>
+                <button className="ghost-button" type="button" onClick={resetLiveMetricTest} disabled={liveTest.state === "off"}>
+                  Dados reais
+                </button>
+              </div>
+            </article>
+            <article className="live-test-panel live-metrics-panel">
+              <span><UsersRound size={15} /> Visualizações e visitas</span>
+              <strong>
+                {liveTest.state === "off"
+                  ? "Simulação desligada"
+                  : `${formatAdminNumber(resolvedLiveMetrics.listeners)} online`}
+              </strong>
+              <p>{liveTest.state === "off" ? "Abra a central para simular público no ambiente local." : `${formatAdminNumber(resolvedLiveMetrics.visitors)} visitantes no topo agora.`}</p>
+              <div className="live-test-actions">
+                <NavLink className="ghost-button" to={adminPanelRoutes.visits}>
+                  <SlidersHorizontal size={16} /> Abrir central
+                </NavLink>
+              </div>
             </article>
           </section>
         </>
+      ) : null}
+
+      {activePanel === "visits" ? (
+        <section className="visit-admin-page">
+          <section className="visit-hero-panel">
+            <div>
+              <span>
+                <UsersRound size={15} /> Central de visitas
+              </span>
+              <h2>Gerenciamento local de público</h2>
+              <p>Controle como os números aparecem no topo do site durante testes locais, sem salvar nada no banco global.</p>
+            </div>
+            <div className={isSimulationActive ? "visit-live-badge is-active" : "visit-live-badge"}>
+              <span>{isSimulationActive ? liveTestLabel(liveTest.state) : "Dados reais"}</span>
+              <strong>{formatAdminNumber(resolvedLiveMetrics.listeners)}</strong>
+              <small>ouvintes agora</small>
+            </div>
+          </section>
+
+          <section className="visit-kpi-grid">
+            <article>
+              <span><Radio size={15} /> Online</span>
+              <strong>{formatAdminNumber(resolvedLiveMetrics.listeners)}</strong>
+              <small>número atual simulado</small>
+            </article>
+            <article>
+              <span><UsersRound size={15} /> Visitantes</span>
+              <strong>{formatAdminNumber(resolvedLiveMetrics.visitors)}</strong>
+              <small>contador exibido no topo</small>
+            </article>
+            <article>
+              <span><Activity size={15} /> Movimento</span>
+              <strong>{liveMetricDraft.movementPercent}%</strong>
+              <small>entrada e saída de ouvintes</small>
+            </article>
+            <article>
+              <span><TrendingUp size={15} /> Ao vivo</span>
+              <strong>{liveMetricDraft.liveBoostPercent}%</strong>
+              <small>ganho quando o estado for ao vivo</small>
+            </article>
+          </section>
+
+          <section className="visit-admin-grid">
+            <form className="visit-control-panel" onSubmit={(event) => event.preventDefault()}>
+              <div className="editor-head">
+                <div>
+                  <span>
+                    <SlidersHorizontal size={15} /> Motor da simulação
+                  </span>
+                  <h2>Controle fino</h2>
+                </div>
+              </div>
+
+              <div className="visit-status-grid" aria-label="Estado do site">
+                {liveStatusOptions.map(({ state, label, icon: Icon }) => (
+                  <button
+                    key={state}
+                    className={liveTest.state === state ? "visit-status-button is-active" : "visit-status-button"}
+                    type="button"
+                    onClick={() => changeLiveSimulationState(state)}
+                    disabled={!canManageLocalMetrics}
+                  >
+                    <Icon size={16} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="visit-field-grid">
+                <label>
+                  Ouvintes base
+                  <input
+                    type="number"
+                    min="0"
+                    max={LIVE_TEST_MAX_LISTENERS}
+                    value={liveMetricDraft.listeners}
+                    onChange={(event) => {
+                      const { value } = event.currentTarget;
+                      setLiveMetricDraft((current) => ({ ...current, listeners: value }));
+                    }}
+                    disabled={!canManageLocalMetrics}
+                  />
+                </label>
+                <label>
+                  Visitantes base
+                  <input
+                    type="number"
+                    min="0"
+                    max={LIVE_TEST_MAX_VISITORS}
+                    value={liveMetricDraft.visitors}
+                    onChange={(event) => {
+                      const { value } = event.currentTarget;
+                      setLiveMetricDraft((current) => ({ ...current, visitors: value }));
+                    }}
+                    disabled={!canManageLocalMetrics}
+                  />
+                </label>
+              </div>
+
+              <div className="visit-range-stack">
+                <label>
+                  <span>Força do movimento <strong>{liveMetricDraft.movementPercent}%</strong></span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={LIVE_TEST_MAX_PERCENT}
+                    value={liveMetricDraft.movementPercent}
+                    onChange={(event) => {
+                      const { value } = event.currentTarget;
+                      setLiveMetricDraft((current) => ({ ...current, movementPercent: value }));
+                    }}
+                    disabled={!canManageLocalMetrics}
+                  />
+                </label>
+                <label>
+                  <span>Impulso quando estiver ao vivo <strong>{liveMetricDraft.liveBoostPercent}%</strong></span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={LIVE_TEST_MAX_PERCENT}
+                    value={liveMetricDraft.liveBoostPercent}
+                    onChange={(event) => {
+                      const { value } = event.currentTarget;
+                      setLiveMetricDraft((current) => ({ ...current, liveBoostPercent: value }));
+                    }}
+                    disabled={!canManageLocalMetrics}
+                  />
+                </label>
+                <label>
+                  <span>Crescimento das visitas <strong>{liveMetricDraft.growthPercent}%</strong></span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={LIVE_TEST_MAX_GROWTH_PERCENT}
+                    value={liveMetricDraft.growthPercent}
+                    onChange={(event) => {
+                      const { value } = event.currentTarget;
+                      setLiveMetricDraft((current) => ({ ...current, growthPercent: value }));
+                    }}
+                    disabled={!canManageLocalMetrics}
+                  />
+                </label>
+              </div>
+
+              <div className="visit-control-actions">
+                <button className="play-main slim" type="button" onClick={applyLiveMetricTest} disabled={!canManageLocalMetrics}>
+                  <Save size={16} /> Aplicar no local
+                </button>
+                <button className="ghost-button" type="button" onClick={shuffleLiveSimulation} disabled={!canManageLocalMetrics}>
+                  <RefreshCw size={16} /> Nova variação
+                </button>
+                <button className="ghost-button" type="button" onClick={resetLiveMetricTest} disabled={!canManageLocalMetrics || liveTest.state === "off"}>
+                  <Power size={16} /> Dados reais
+                </button>
+              </div>
+            </form>
+
+            <aside className="visit-preview-panel">
+              <div className="editor-head">
+                <div>
+                  <span>
+                    <BarChart3 size={15} /> Prévia do topo
+                  </span>
+                  <h2>Resultado no site</h2>
+                </div>
+              </div>
+              <div className="visit-top-preview">
+                <span className={visitPreviewStatusClassName(liveTest.state)}>
+                  <strong>{isSimulationActive ? liveTestLabel(liveTest.state) : "REAIS"}</strong>
+                </span>
+                <div>
+                  <small>Online</small>
+                  <strong>{formatAdminNumber(resolvedLiveMetrics.listeners)}</strong>
+                </div>
+                <div>
+                  <small>Visitantes</small>
+                  <strong>{formatAdminNumber(resolvedLiveMetrics.visitors)}</strong>
+                </div>
+              </div>
+              <div className="visit-wave-preview" aria-hidden="true">
+                {visitWaveBars.map((height, index) => (
+                  <span key={index} style={{ height: `${height}%` }} />
+                ))}
+              </div>
+              <div className="visit-rule-list">
+                <p><Activity size={15} /> Ouvintes oscilam para cima e para baixo conforme a força do movimento.</p>
+                <p><TrendingUp size={15} /> Visitantes crescem aos poucos a partir do número base.</p>
+                <p><Radio size={15} /> O estado “Ao vivo” aplica impulso extra automaticamente.</p>
+              </div>
+            </aside>
+          </section>
+        </section>
       ) : null}
 
       {activePanel === "ads" ? (
@@ -962,88 +1366,7 @@ export function AdsAdminPage() {
         </button>
       </section>
 
-      <section className="ad-settings-panel">
-        <div className="editor-head">
-          <div>
-            <span>
-              <Settings2 size={15} /> Configuração global
-            </span>
-            <h2>Exibição dos anúncios</h2>
-          </div>
-        </div>
-        <div className="ad-settings-grid">
-          <label className="check-line">
-            <input
-              type="checkbox"
-              checked={settings.enabled}
-              disabled={!canEditAds}
-              onChange={(event) => {
-                void persistSettings({ enabled: event.currentTarget.checked });
-              }}
-            />
-            Anúncios ativados no site
-          </label>
-          <label className="check-line">
-            <input
-              type="checkbox"
-              checked={settings.scheduleEnabled}
-              disabled={!canEditAds}
-              onChange={(event) => {
-                void persistSettings({ scheduleEnabled: event.currentTarget.checked });
-              }}
-            />
-            Usar horário programado
-          </label>
-          <label>
-            Início
-            <input
-              type="time"
-              value={settings.startTime}
-              onChange={(event) => {
-                void persistSettings({ startTime: event.currentTarget.value });
-              }}
-              disabled={!canEditAds || !settings.scheduleEnabled}
-            />
-          </label>
-          <label>
-            Fim
-            <input
-              type="time"
-              value={settings.endTime}
-              onChange={(event) => {
-                void persistSettings({ endTime: event.currentTarget.value });
-              }}
-              disabled={!canEditAds || !settings.scheduleEnabled}
-            />
-          </label>
-          <label>
-            Comerciais antes de programa
-            <input
-              type="number"
-              min="1"
-              max="12"
-              value={settings.commercialRuns}
-              onChange={(event) => {
-                void persistSettings({ commercialRuns: Number(event.currentTarget.value) || 3 });
-              }}
-              disabled={!canEditAds}
-            />
-          </label>
-          <label>
-            Chamadas de programa
-            <input
-              type="number"
-              min="0"
-              max="6"
-              value={settings.programRuns}
-              onChange={(event) => {
-                void persistSettings({ programRuns: Number(event.currentTarget.value) || 1 });
-              }}
-              disabled={!canEditAds}
-            />
-          </label>
-        </div>
-      </section>
+      <AdDisplaySettingsPanel canEditAds={canEditAds} persistSettings={persistSettings} settings={settings} />
 
       <section className="admin-grid">
         <form className="ad-editor" onSubmit={saveDraft}>
@@ -1196,7 +1519,7 @@ export function AdsAdminPage() {
                   <div>
                     <strong>{ad.title || "Anúncio sem título"}</strong>
                     <span>{ad.active ? "Ativo" : "Desativado"} · {placementLabel(ad.placement)}</span>
-                    <small>{ad.impressions} exibições · {ad.clicks} cliques</small>
+                    <small>{ad.linkUrl ? `${ad.clicks} toques no link` : "Sem link configurado"}</small>
                   </div>
                   <div className="ad-list-actions">
                     <button type="button" onClick={() => editAd(ad)} aria-label="Editar anúncio">
@@ -1243,7 +1566,10 @@ export function AdsAdminPage() {
       ) : null}
 
       {activePanel === "programs" ? (
-        <section className="admin-grid program-admin-grid">
+        <>
+          <AdDisplaySettingsPanel canEditAds={canEditAds} persistSettings={persistSettings} settings={settings} />
+
+          <section className="admin-grid program-admin-grid">
           <form className="ad-editor" onSubmit={saveProgramDraft}>
             <div className="editor-head">
               <div>
@@ -1258,7 +1584,7 @@ export function AdsAdminPage() {
             <label className={canEditAds ? "upload-drop program-logo-drop" : "upload-drop program-logo-drop is-disabled"}>
               <UploadCloud size={24} />
               <strong>Enviar logo do programa</strong>
-              <span>Até 1800px e 2,5 MB. Ela aparece quando não houver capa de álbum.</span>
+              <span>PNG vira WebP. WebP pronto também é aceito, até 1800px e 2,5 MB.</span>
               <input type="file" accept="image/png,image/webp" onChange={handleProgramLogoFile} disabled={!canEditAds} />
             </label>
             {programUploadState.message ? (
@@ -1410,7 +1736,8 @@ export function AdsAdminPage() {
               </div>
             )}
           </aside>
-        </section>
+          </section>
+        </>
       ) : null}
 
       {activePanel === "djs" ? (
@@ -1551,6 +1878,99 @@ export function AdsAdminPage() {
   );
 }
 
+type AdDisplaySettingsPanelProps = {
+  canEditAds: boolean;
+  persistSettings: (nextSettings: Partial<AdSettings>) => Promise<void>;
+  settings: AdSettings;
+};
+
+function AdDisplaySettingsPanel({ canEditAds, persistSettings, settings }: AdDisplaySettingsPanelProps) {
+  return (
+    <section className="ad-settings-panel">
+      <div className="editor-head">
+        <div>
+          <span>
+            <Settings2 size={15} /> Configuração global
+          </span>
+          <h2>Exibição dos anúncios</h2>
+        </div>
+      </div>
+      <div className="ad-settings-grid">
+        <label className="check-line">
+          <input
+            type="checkbox"
+            checked={settings.enabled}
+            disabled={!canEditAds}
+            onChange={(event) => {
+              void persistSettings({ enabled: event.currentTarget.checked });
+            }}
+          />
+          Anúncios ativados no site
+        </label>
+        <label className="check-line">
+          <input
+            type="checkbox"
+            checked={settings.scheduleEnabled}
+            disabled={!canEditAds}
+            onChange={(event) => {
+              void persistSettings({ scheduleEnabled: event.currentTarget.checked });
+            }}
+          />
+          Usar horário programado
+        </label>
+        <label>
+          Início
+          <input
+            type="time"
+            value={settings.startTime}
+            onChange={(event) => {
+              void persistSettings({ startTime: event.currentTarget.value });
+            }}
+            disabled={!canEditAds || !settings.scheduleEnabled}
+          />
+        </label>
+        <label>
+          Fim
+          <input
+            type="time"
+            value={settings.endTime}
+            onChange={(event) => {
+              void persistSettings({ endTime: event.currentTarget.value });
+            }}
+            disabled={!canEditAds || !settings.scheduleEnabled}
+          />
+        </label>
+        <label>
+          Comerciais antes de programa
+          <input
+            type="number"
+            min="1"
+            max="12"
+            value={settings.commercialRuns}
+            onChange={(event) => {
+              void persistSettings({ commercialRuns: Number(event.currentTarget.value) || 3 });
+            }}
+            disabled={!canEditAds}
+          />
+        </label>
+        <label>
+          Chamadas de programa
+          <input
+            type="number"
+            min="0"
+            max="6"
+            value={settings.programRuns}
+            onChange={(event) => {
+              void persistSettings({ programRuns: Number(event.currentTarget.value) || 1 });
+            }}
+            disabled={!canEditAds}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
 function readImageSize(file: File) {
   return new Promise<{ width: number; height: number }>((resolve, reject) => {
     const image = new Image();
@@ -1575,6 +1995,71 @@ function readFileAsDataUrl(file: File) {
     reader.onerror = () => reject(new Error("Não foi possível ler o arquivo."));
     reader.readAsDataURL(file);
   });
+}
+
+function imageContentTypeForFile(file: File) {
+  const contentType = file.type.toLowerCase();
+  if (contentType) return contentType;
+
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".webp")) return "image/webp";
+  return "";
+}
+
+async function prepareProgramLogoUpload(
+  file: File,
+  size: { width: number; height: number },
+  sourceType: string,
+) {
+  const sourceDataUrl = await readFileAsDataUrl(file);
+
+  if (sourceType === "image/webp") {
+    const dataBase64 = sourceDataUrl.split(",")[1] || "";
+
+    return {
+      fileName: toWebpProgramLogoFileName(file.name),
+      contentType: "image/webp" as const,
+      width: size.width,
+      height: size.height,
+      dataUrl: `data:image/webp;base64,${dataBase64}`,
+      dataBase64,
+      size: file.size,
+      converted: false,
+    };
+  }
+
+  const image = await loadImageElement(sourceDataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Seu navegador não conseguiu preparar o WebP.");
+
+  context.clearRect(0, 0, size.width, size.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, size.width, size.height);
+
+  const webpBlob = await canvasToBlob(canvas, "image/webp", 0.88);
+  const dataUrl = await blobToDataUrl(webpBlob);
+
+  return {
+    fileName: toWebpProgramLogoFileName(file.name),
+    contentType: "image/webp" as const,
+    width: size.width,
+    height: size.height,
+    dataUrl,
+    dataBase64: dataUrl.split(",")[1] || "",
+    size: webpBlob.size,
+    converted: true,
+  };
+}
+
+function toWebpProgramLogoFileName(fileName: string) {
+  const cleanName = fileName.trim().replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "programa";
+  return `${cleanName}.webp`;
 }
 
 function toDateTimeInput(value: string | null) {
@@ -1602,6 +2087,49 @@ function liveTestLabel(value: LiveStatusTestPayload["state"]) {
   if (value === "connecting") return "Conectando";
   if (value === "offline") return "Fora do ar";
   return "Dados reais";
+}
+
+function liveMetricDraftFromPayload(payload: LiveStatusTestPayload) {
+  return {
+    listeners: String(payload.listeners ?? LIVE_TEST_DEFAULT_LISTENERS),
+    visitors: String(payload.visitors ?? LIVE_TEST_DEFAULT_VISITORS),
+    movementPercent: String(payload.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT),
+    liveBoostPercent: String(payload.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST),
+    growthPercent: String(payload.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH),
+  };
+}
+
+function parseLiveMetric(value: string, fallback: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(0, Math.round(parsed)));
+}
+
+function formatAdminNumber(value: number) {
+  return new Intl.NumberFormat("pt-BR").format(Math.max(0, Math.round(value)));
+}
+
+function nextSimulationSeed() {
+  return Math.max(1, Math.round(Date.now() % 999_999));
+}
+
+function makeVisitWaveBars(payload: LiveStatusTestPayload, nowMs: number) {
+  const movement = Number(payload.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
+  const seed = Number(payload.seed ?? 731) / 97;
+
+  return Array.from({ length: 22 }, (_, index) => {
+    const point = nowMs / 760 + index * 0.78 + seed;
+    const wave = Math.sin(point) * 0.58 + Math.cos(point * 0.62) * 0.34;
+    const level = 38 + wave * 26 * Math.max(0.18, movement) + index * 0.6;
+    return Math.min(92, Math.max(18, Math.round(level)));
+  });
+}
+
+function visitPreviewStatusClassName(state: LiveStatusTestPayload["state"]) {
+  if (state === "live") return "header-status is-live";
+  if (state === "online") return "header-status is-online";
+  if (state === "connecting") return "header-status is-connecting";
+  return "header-status is-offline";
 }
 
 function needsWebpMigration(ad: SiteAd) {

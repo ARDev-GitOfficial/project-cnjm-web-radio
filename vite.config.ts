@@ -556,6 +556,7 @@ function installApi(server: ViteDevServer | PreviewServer) {
     if (/^\/api\/ads\/[^/]+\/stats$/.test(pathname)) {
       json(res, 200, {
         ok: true,
+        skipped: true,
       });
       return;
     }

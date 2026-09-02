@@ -266,7 +266,7 @@ export function buildAdRotation(ads: SiteAd[], settings: AdSettings) {
   return result;
 }
 
-export function updateAdStats(id: string, field: "impressions" | "clicks") {
+export function updateAdStats(id: string, field: "clicks") {
   const ads = loadAds();
   const next = ads.map((ad) =>
     ad.id === id
@@ -280,9 +280,7 @@ export function updateAdStats(id: string, field: "impressions" | "clicks") {
   saveAds(next);
 }
 
-export async function sendAdStat(id: string, field: "impressions" | "clicks") {
-  if (field === "impressions") return;
-
+export async function sendAdStat(id: string, field: "clicks") {
   try {
     await requestJson(`${API_BASE}/${encodeURIComponent(id)}/stats`, {
       method: "POST",
@@ -499,6 +497,7 @@ export function optimizedAdImageUrl(src: string, width = AD_BANNER_WIDTH, height
   if (!src || src.startsWith("data:") || src.startsWith("blob:")) return src;
   if (typeof window === "undefined") return src;
   if (src.startsWith("/api/ads/image/")) return src;
+  if (isDirectWebpUrl(src)) return src;
 
   const host = window.location.hostname;
   if (host === "localhost" || host === "127.0.0.1") return src;
@@ -514,6 +513,15 @@ export function optimizedAdImageUrl(src: string, width = AD_BANNER_WIDTH, height
   });
 
   return `/.netlify/images?${params.toString()}`;
+}
+
+function isDirectWebpUrl(src: string) {
+  try {
+    const url = src.startsWith("/") ? new URL(src, window.location.origin) : new URL(src);
+    return /\.webp$/i.test(url.pathname);
+  } catch {
+    return /\.webp(?:$|[?#])/i.test(src);
+  }
 }
 
 export function notifyAdsUpdated() {

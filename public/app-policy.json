@@ -95,11 +95,11 @@
       },
       {
         "title": "9. Estatisticas de anuncios",
-        "body": "Para controle interno, o app pode registrar quando um anuncio foi exibido ou clicado.",
+        "body": "Para controle interno, o app pode registrar quando um banner com link foi tocado.",
         "bullets": [
-          "As estatisticas podem incluir identificador do anuncio, tipo de evento, data/hora tecnica e contadores de exibicao ou clique.",
-          "Essas estatisticas sao usadas para medir campanhas, evitar erro de exibicao e prestar contas a parceiros.",
-          "O app nao precisa identificar nominalmente o ouvinte para registrar exibicao ou clique de banner.",
+          "As estatisticas podem incluir identificador do anuncio, tipo de evento, data/hora tecnica e contador de clique.",
+          "Essas estatisticas sao usadas para medir interesse em campanhas e prestar contas a parceiros.",
+          "O app nao precisa identificar nominalmente o ouvinte para registrar clique em banner.",
           "Sites externos abertos apos o clique podem coletar seus proprios dados conforme suas politicas."
         ]
       },

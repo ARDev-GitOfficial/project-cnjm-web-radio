@@ -40,6 +40,7 @@ const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
 const NOW_PLAYING_REFRESH_MS = 60_000;
+const LOCAL_SIMULATION_REFRESH_MS = 5_000;
 
 type BrowserAudioContext = typeof AudioContext;
 
@@ -90,6 +91,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const updateTest = () => {
       const nextTest = readLiveStatusTest();
       setLiveStatusTest(nextTest);
+      if (nextTest.state === "off") {
+        void refreshNowPlaying();
+        return;
+      }
       setNowPlaying((current) => applyLiveStatusTest(current, nextTest));
     };
 
@@ -98,6 +103,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => {
       window.removeEventListener("storage", updateTest);
       window.removeEventListener("cnjm-live-status-test", updateTest);
+    };
+  }, [refreshNowPlaying]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const nextTest = readLiveStatusTest();
+      if (nextTest.state === "off") return;
+
+      setLiveStatusTest(nextTest);
+      setNowPlaying((current) => applyLiveStatusTest(current, nextTest));
+    }, LOCAL_SIMULATION_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(timer);
     };
   }, []);
 

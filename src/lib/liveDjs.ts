@@ -24,6 +24,18 @@ export type LiveStatusTestPayload = {
   state: BroadcastState | "off";
   djName?: string;
   programName?: string;
+  listeners?: number;
+  visitors?: number;
+  movementPercent?: number;
+  liveBoostPercent?: number;
+  growthPercent?: number;
+  seed?: number;
+  updatedAt?: string;
+};
+
+export type LiveStatusResolvedMetrics = {
+  listeners: number;
+  visitors: number;
 };
 
 type ApiDjsPayload = {
@@ -37,6 +49,15 @@ type ApiDjsPayload = {
 
 export const DJ_STORAGE_KEY = "cnjm-station-djs-v1";
 export const LIVE_STATUS_TEST_KEY = "cnjm-live-status-test-v1";
+export const LIVE_TEST_DEFAULT_LISTENERS = 2;
+export const LIVE_TEST_DEFAULT_VISITORS = 49_823;
+export const LIVE_TEST_DEFAULT_MOVEMENT = 32;
+export const LIVE_TEST_DEFAULT_LIVE_BOOST = 65;
+export const LIVE_TEST_DEFAULT_GROWTH = 12;
+export const LIVE_TEST_MAX_LISTENERS = 999_999;
+export const LIVE_TEST_MAX_VISITORS = 9_999_999;
+export const LIVE_TEST_MAX_PERCENT = 200;
+export const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
 
 const API_BASE = "/api/djs";
 
@@ -145,6 +166,7 @@ export function writeLiveStatusTest(payload: LiveStatusTestPayload) {
 }
 
 export function nextLiveStatusTest(current: LiveStatusTestPayload, dj?: StationDj): LiveStatusTestPayload {
+  const normalizedCurrent = normalizeLiveStatusTest(current);
   const order: LiveStatusTestPayload["state"][] = ["online", "connecting", "offline", "live", "off"];
   const currentIndex = Math.max(0, order.indexOf(current.state));
   const nextState = order[(currentIndex + 1) % order.length] || "online";
@@ -156,7 +178,44 @@ export function nextLiveStatusTest(current: LiveStatusTestPayload, dj?: StationD
     state: nextState,
     djName: sampleDj.djName,
     programName: sampleDj.programName,
+    listeners: normalizedCurrent.listeners,
+    visitors: normalizedCurrent.visitors,
+    movementPercent: normalizedCurrent.movementPercent,
+    liveBoostPercent: normalizedCurrent.liveBoostPercent,
+    growthPercent: normalizedCurrent.growthPercent,
+    seed: normalizedCurrent.seed,
+    updatedAt: normalizedCurrent.updatedAt,
   };
+}
+
+export function resolveLiveStatusTestMetrics(
+  payload: LiveStatusTestPayload,
+  nowMs = Date.now(),
+): LiveStatusResolvedMetrics {
+  const test = normalizeLiveStatusTest(payload);
+  const baseListeners = test.listeners ?? LIVE_TEST_DEFAULT_LISTENERS;
+  const baseVisitors = test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
+  const movement = (test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
+  const liveBoost = test.state === "live" ? (test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST) / 100 : 0;
+  const growth = (test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH) / 100;
+  const startedAt = normalizeDateMs(test.updatedAt);
+  const elapsedMinutes = startedAt ? Math.max(0, (nowMs - startedAt) / 60_000) : 0;
+  const seed = (test.seed ?? 731) / 97;
+  const seconds = nowMs / 1000;
+  const wave = Math.sin(seconds / 9 + seed) * 0.56 + Math.sin(seconds / 23 + seed * 1.8) * 0.32;
+  const softWave = (wave + 1) / 2;
+  const stateFactor = test.state === "connecting" ? 0.62 : 1;
+  const listenerMovement = 1 + wave * 0.3 * movement;
+  const visitorGrowth = 1 + Math.min(0.72, (elapsedMinutes / 240) * growth);
+  const visitorPulse = 1 + softWave * 0.045 * movement + liveBoost * 0.34;
+  const listeners = test.state === "offline" || test.state === "off"
+    ? 0
+    : normalizeWholeNumber(baseListeners * stateFactor * listenerMovement * (1 + liveBoost), 0, 0, LIVE_TEST_MAX_LISTENERS);
+  const visitors = test.state === "off"
+    ? baseVisitors
+    : normalizeWholeNumber(baseVisitors * visitorGrowth * visitorPulse, baseVisitors, 0, LIVE_TEST_MAX_VISITORS);
+
+  return { listeners, visitors };
 }
 
 export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLiveStatusTest()): NowPlayingResponse {
@@ -172,12 +231,17 @@ export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLive
     detectedValue: "simulação local",
     source: "test" as const,
   };
+  const { listeners, visitors } = resolveLiveStatusTestMetrics(test);
 
   return {
     ...data,
     ok: test.state !== "offline",
     stats: {
       ...data.stats,
+      listeners,
+      peakListeners: Math.max(Number(data.stats.peakListeners || 0), listeners),
+      uniqueListeners: Math.max(Number(data.stats.uniqueListeners || 0), listeners),
+      streamHits: visitors,
       isOnline: test.state !== "offline",
     },
     liveDj,
@@ -235,13 +299,33 @@ function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>): LiveS
     state,
     djName: String(payload.djName || "DJ Leo").trim(),
     programName: String(payload.programName || "Roots Strike").trim(),
+    listeners: normalizeWholeNumber(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS),
+    visitors: normalizeWholeNumber(payload.visitors, LIVE_TEST_DEFAULT_VISITORS, 0, LIVE_TEST_MAX_VISITORS),
+    movementPercent: normalizeWholeNumber(payload.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+    liveBoostPercent: normalizeWholeNumber(payload.liveBoostPercent, LIVE_TEST_DEFAULT_LIVE_BOOST, 0, LIVE_TEST_MAX_PERCENT),
+    growthPercent: normalizeWholeNumber(payload.growthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    seed: normalizeWholeNumber(payload.seed, 731, 1, 999_999),
+    updatedAt: normalizeIsoString(payload.updatedAt) || new Date().toISOString(),
   };
+}
+
+function normalizeWholeNumber(value: unknown, fallback: number, min: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
 }
 
 function normalizeIsoString(value: unknown) {
   if (!value) return null;
   const date = new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function normalizeDateMs(value: unknown) {
+  if (!value) return null;
+  const date = new Date(String(value));
+  const time = date.getTime();
+  return Number.isNaN(time) ? null : time;
 }
 
 function sortDjs(left: StationDj, right: StationDj) {

@@ -32,7 +32,7 @@ export function PoliciesPage() {
         <article className="glass-panel policy-card">
           <h2>Publicidade e segurança</h2>
           <p>
-            Anúncios podem registrar exibições e cliques para controle interno. A área
+            Anúncios com link podem registrar cliques para controle interno. A área
             administrativa é restrita e não expõe configurações sensíveis do sistema.
           </p>
         </article>

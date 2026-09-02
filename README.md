@@ -32,6 +32,12 @@ No Netlify, confirme:
 - as migrações em `netlify/database/migrations` foram enviadas;
 - as variáveis de admin foram configuradas no painel do site.
 
+## Métricas econômicas dos flyers
+
+O site não grava exibições de anúncios nem simula visualizações públicas. Para reduzir chamadas ao Netlify e manter a métrica mais útil, apenas flyers com link registram toques/cliques em `/api/ads/:id/stats`.
+
+O contador público exibido em `/api/now-playing`, dentro de `stats.streamHits`, vem diretamente do provedor de stream.
+
 ## Upload
 
 Para manter rádio, programação, câmera e chat com leitura real, faça deploy pelo Git ou Netlify CLI usando a pasta `site`, pois as funções em `netlify/functions` precisam ser enviadas junto.

@@ -995,10 +995,14 @@ async function handleAds(event, pathname) {
 
     try {
       const payload = readJsonBody(event);
-      if (payload.field === "impressions") {
-        return json(200, { ok: true, skipped: true, message: "Exibições não são gravadas para economizar banco." });
+      if (payload.field !== "clicks") {
+        return json(200, {
+          ok: true,
+          skipped: true,
+          message: "Somente toques em flyers com link são gravados.",
+        });
       }
-      const ad = await updateAdStats(parts[1], payload.field);
+      const ad = await updateAdStats(parts[1], "clicks");
       return json(200, { ok: true, ad });
     } catch (error) {
       return serverError(error, "Não foi possível atualizar as métricas.");

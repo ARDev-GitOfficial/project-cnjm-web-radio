@@ -45,7 +45,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     let viewportWidth = 1;
     let viewportHeight = 1;
     let barGradient: CanvasGradient | null = null;
-    let glowGradient: CanvasGradient | null = null;
+    let reflectionGradient: CanvasGradient | null = null;
     let gradientKey = "";
 
     let bins = new Uint8Array(64);
@@ -55,14 +55,6 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     let guitarEnvelope = 0;
     const startTime = performance.now();
     const loopMs = 36000;
-
-    const particles = Array.from({ length: 36 }, (_, index) => ({
-      x: (Math.sin(index * 41.23) * 0.5 + 0.5) * 100,
-      y: (Math.sin(index * 17.71) * 0.5 + 0.5) * 100,
-      size: 0.62 + (index % 7) * 0.16,
-      drift: Math.sin(index * 2.2) * 0.018,
-      tone: index % 3,
-    }));
 
     const targetFrameInterval = () => 1000 / targetFps;
 
@@ -110,6 +102,7 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       canvas.height = Math.max(1, Math.floor(viewportHeight * pixelRatio));
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       gradientKey = "";
+      reflectionGradient = null;
     };
 
     const requestResize = () => {
@@ -203,34 +196,24 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
 
       context.clearRect(0, 0, width, height);
       context.globalCompositeOperation = "source-over";
-      context.fillStyle = "rgba(3, 6, 3, 0.28)";
-      context.fillRect(0, 0, width, height);
-
-      if (!isReducedMotion && width > 640) {
-        const sweepProgress = (Math.sin(loopAngle - Math.PI / 2) + 1) / 2;
-        const sweepX = width * (-0.12 + sweepProgress * 1.24);
-        const sweep = context.createLinearGradient(sweepX - width * 0.18, 0, sweepX + width * 0.06, height);
-        sweep.addColorStop(0, "rgba(47, 232, 138, 0)");
-        sweep.addColorStop(0.5, `rgba(243, 203, 79, ${0.03 + beat * 0.035})`);
-        sweep.addColorStop(1, "rgba(47, 232, 138, 0)");
-        context.fillStyle = sweep;
-        context.fillRect(0, 0, width, height);
-      }
 
       const nextGradientKey = `${Math.round(width)}:${Math.round(height)}:${Math.round(baselineY)}`;
-      if (!barGradient || !glowGradient || gradientKey !== nextGradientKey) {
+      if (!barGradient || gradientKey !== nextGradientKey) {
         gradientKey = nextGradientKey;
         barGradient = context.createLinearGradient(0, baselineY - height * 0.54, 0, baselineY + height * 0.1);
         barGradient.addColorStop(0, "rgba(47, 232, 138, 0.68)");
         barGradient.addColorStop(0.52, "rgba(243, 203, 79, 0.56)");
         barGradient.addColorStop(1, "rgba(255, 247, 201, 0.14)");
 
-        glowGradient = context.createLinearGradient(0, baselineY - height * 0.5, 0, baselineY);
-        glowGradient.addColorStop(0, "rgba(47, 232, 138, 0.14)");
-        glowGradient.addColorStop(0.62, "rgba(243, 203, 79, 0.1)");
-        glowGradient.addColorStop(1, "rgba(255, 247, 201, 0.02)");
+        reflectionGradient = context.createLinearGradient(0, baselineY, 0, height);
+        reflectionGradient.addColorStop(0, "rgba(255, 247, 201, 0.18)");
+        reflectionGradient.addColorStop(0.24, "rgba(243, 203, 79, 0.12)");
+        reflectionGradient.addColorStop(0.58, "rgba(47, 232, 138, 0.06)");
+        reflectionGradient.addColorStop(1, "rgba(47, 232, 138, 0)");
       }
-      const showGlow = !isReducedMotion && !isCoarsePointer && width > 768;
+
+      const reflectionGap = Math.max(3, Math.min(9, height * 0.008));
+      const reflectionLimit = Math.max(0, height - baselineY - reflectionGap);
 
       for (let index = 0; index < barCount; index += 1) {
         const bin = bins[Math.floor(index / barCount * bins.length)] ?? 0;
@@ -261,53 +244,22 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         const x = startX + index * (barWidth + gap);
         const y = baselineY - barHeight;
 
-        if (showGlow && power > 0.38 && index % 3 === 0) {
-          context.globalAlpha = Math.min(0.24, 0.06 + power * 0.13 + beat * 0.05);
-          context.fillStyle = glowGradient;
-          roundRect(context, x - gap, y - 3, barWidth + gap * 2, barHeight + 7, Math.min(10, barWidth));
-          context.fill();
-        }
-
         context.globalAlpha = Math.min(1, 0.48 + power * 0.46);
         context.fillStyle = barGradient;
         roundRect(context, x, y, barWidth, barHeight, Math.min(8, barWidth));
         context.fill();
-        context.globalAlpha = 1;
 
-        if (width > 480) {
-          context.fillStyle = `rgba(243, 203, 79, ${0.03 + power * 0.06})`;
-          roundRect(context, x, baselineY + 8, barWidth, Math.min(height * 0.1, barHeight * 0.15), Math.min(8, barWidth));
+        const reflectionHeight = Math.min(reflectionLimit, Math.max(12, barHeight * 0.58));
+        if (reflectionGradient && reflectionHeight > 2) {
+          context.globalAlpha = Math.min(0.34, 0.07 + power * 0.2);
+          context.fillStyle = reflectionGradient;
+          roundRect(context, x, baselineY + reflectionGap, barWidth, reflectionHeight, Math.min(8, barWidth));
           context.fill();
         }
+        context.globalAlpha = 1;
       }
 
       context.shadowBlur = 0;
-      const visibleParticleCount = isReducedMotion ? 0 : width < 768 || isCoarsePointer ? 14 : 28;
-      for (let particleIndex = 0; particleIndex < visibleParticleCount; particleIndex += 1) {
-        const particle = particles[particleIndex];
-        if (!particle) continue;
-        const fallCycles = 1 + (particle.tone % 3);
-        const yNorm = ((particle.y / 100 + loop * fallCycles) % 1 + 1) % 1;
-        const xDrift =
-          Math.sin(loopAngle * (1 + particle.tone) + particle.x * 0.12) * 0.028 +
-          Math.sin(loopAngle * 2 + particle.y * 0.05) * particle.drift;
-        const xNorm = ((particle.x / 100 + xDrift) % 1 + 1) % 1;
-        const x = xNorm * width;
-        const alpha = 0.04 + beat * 0.03 + particle.size * 0.005;
-        for (const wrap of [0, -1]) {
-          const y = (yNorm + wrap) * height;
-          if (y < -8 || y > height + 8) continue;
-          context.beginPath();
-          context.fillStyle =
-            particle.tone === 0
-              ? `rgba(47, 232, 138, ${alpha})`
-              : particle.tone === 1
-                ? `rgba(243, 203, 79, ${alpha})`
-                : `rgba(255, 247, 201, ${alpha * 0.65})`;
-          context.arc(x, y, particle.size, 0, Math.PI * 2);
-          context.fill();
-        }
-      }
 
       updateAdaptiveRate(performance.now() - renderStart, deltaTime);
       requestFrame();

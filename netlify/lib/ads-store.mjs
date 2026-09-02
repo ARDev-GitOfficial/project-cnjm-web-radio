@@ -12,12 +12,18 @@ const ADS_BLOB_STORE = "cnjm-ad-images";
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
 const IMAGE_CONTENT_TYPES = new Set(["image/png", "image/webp"]);
-const ADMIN_LOGIN = process.env.CNJM_ADS_ADMIN_LOGIN || "AdminRoots";
-const DEFAULT_ADMIN_PASSWORD_HASH = "3365305e71f599bc6859e66c1c02d2f1e546010adc10f02e3b3364ebf1241b33";
+const IS_LOCAL_NETLIFY_DEV = process.env.NETLIFY_DEV === "true";
+const LOCAL_ADMIN_LOGIN = "AdminRoots";
+const LOCAL_ADMIN_PASSWORD_HASH = "3365305e71f599bc6859e66c1c02d2f1e546010adc10f02e3b3364ebf1241b33";
+const ADMIN_LOGIN = process.env.CNJM_ADS_ADMIN_LOGIN || (IS_LOCAL_NETLIFY_DEV ? LOCAL_ADMIN_LOGIN : "");
 const ADMIN_PASSWORD_HASH =
   process.env.CNJM_ADS_ADMIN_PASSWORD_HASH ||
-  (process.env.CNJM_ADS_ADMIN_PASSWORD ? sha256Hex(process.env.CNJM_ADS_ADMIN_PASSWORD) : DEFAULT_ADMIN_PASSWORD_HASH);
-const ADMIN_TOKEN = process.env.CNJM_ADS_ADMIN_TOKEN || ADMIN_PASSWORD_HASH;
+  (process.env.CNJM_ADS_ADMIN_PASSWORD
+    ? sha256Hex(process.env.CNJM_ADS_ADMIN_PASSWORD)
+    : IS_LOCAL_NETLIFY_DEV
+      ? LOCAL_ADMIN_PASSWORD_HASH
+      : "");
+const ADMIN_TOKEN = process.env.CNJM_ADS_ADMIN_TOKEN || (IS_LOCAL_NETLIFY_DEV ? ADMIN_PASSWORD_HASH : "");
 const BLOB_SITE_ID_ENV_KEYS = ["NETLIFY_BLOBS_SITE_ID", "NETLIFY_BLOBS_SITEID", "NETLIFY_SITE_ID", "SITE_ID"];
 const BLOB_TOKEN_ENV_KEYS = ["NETLIFY_BLOBS_TOKEN", "NETLIFY_AUTH_TOKEN", "NETLIFY_API_TOKEN"];
 const DAY_ORDER = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -666,66 +672,40 @@ export async function deleteAd(id) {
 }
 
 export async function updateAdStats(id, field) {
-  if (!["impressions", "clicks"].includes(field)) {
+  if (field !== "clicks") {
     throw new Error("Invalid stats field.");
   }
 
   const updatedAt = new Date();
-  const [ad] = field === "impressions"
-    ? await db()`
-        UPDATE site_ads
-        SET impressions = impressions + 1, updated_at = ${updatedAt}
-        WHERE id = ${String(id)}
-        RETURNING
-          id,
-          title,
-          description,
-          image_url AS "imageUrl",
-          image_key AS "imageKey",
-          image_width AS "imageWidth",
-          image_height AS "imageHeight",
-          image_content_type AS "imageContentType",
-          image_size AS "imageSize",
-          link_url AS "linkUrl",
-          button_label AS "buttonLabel",
-          placement,
-          section,
-          active,
-          impressions,
-          clicks,
-          sort_order AS "sortOrder",
-          starts_at AS "startsAt",
-          ends_at AS "endsAt",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-      `
-    : await db()`
-        UPDATE site_ads
-        SET clicks = clicks + 1, updated_at = ${updatedAt}
-        WHERE id = ${String(id)}
-        RETURNING
-          id,
-          title,
-          description,
-          image_url AS "imageUrl",
-          image_key AS "imageKey",
-          image_width AS "imageWidth",
-          image_height AS "imageHeight",
-          image_content_type AS "imageContentType",
-          image_size AS "imageSize",
-          link_url AS "linkUrl",
-          button_label AS "buttonLabel",
-          placement,
-          section,
-          active,
-          impressions,
-          clicks,
-          sort_order AS "sortOrder",
-          starts_at AS "startsAt",
-          ends_at AS "endsAt",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-      `;
+  const [ad] = await db()`
+    UPDATE site_ads
+    SET clicks = clicks + 1, updated_at = ${updatedAt}
+    WHERE id = ${String(id)}
+      AND link_url IS NOT NULL
+      AND link_url <> ''
+    RETURNING
+      id,
+      title,
+      description,
+      image_url AS "imageUrl",
+      image_key AS "imageKey",
+      image_width AS "imageWidth",
+      image_height AS "imageHeight",
+      image_content_type AS "imageContentType",
+      image_size AS "imageSize",
+      link_url AS "linkUrl",
+      button_label AS "buttonLabel",
+      placement,
+      section,
+      active,
+      impressions,
+      clicks,
+      sort_order AS "sortOrder",
+      starts_at AS "startsAt",
+      ends_at AS "endsAt",
+      created_at AS "createdAt",
+      updated_at AS "updatedAt"
+  `;
 
   return ad ? serializeAd(ad) : null;
 }
@@ -1081,7 +1061,7 @@ export async function saveProgramLogo(payload) {
   const height = Number(payload.height || 0);
   const dataBase64 = String(payload.dataBase64 || "");
 
-  if (!isSupportedImageContentType(contentType)) throw new Error("Envie uma logo PNG ou WebP.");
+  if (contentType !== "image/webp") throw new Error("Envie uma logo WebP. O painel converte PNG antes de salvar.");
   if (!width || !height || width > PROGRAM_LOGO_MAX_DIMENSION || height > PROGRAM_LOGO_MAX_DIMENSION) {
     throw new Error(`A logo precisa ter até ${PROGRAM_LOGO_MAX_DIMENSION}px de largura e altura.`);
   }
@@ -1092,14 +1072,14 @@ export async function saveProgramLogo(payload) {
     throw new Error("A logo precisa ter até 2,5 MB.");
   }
 
-  const key = `program-${Date.now()}-${randomUUID()}.${imageExtensionForContentType(contentType)}`;
+  const key = `program-${Date.now()}-${randomUUID()}.webp`;
   const store = adImageStore();
   await store.set(key, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), {
     metadata: {
       contentType,
       width,
       height,
-      originalName: String(payload.fileName || `programa.${imageExtensionForContentType(contentType)}`),
+      originalName: String(payload.fileName || "programa.webp"),
     },
   });
 
@@ -1128,6 +1108,7 @@ export async function readAdImage(key) {
 }
 
 export function isValidAdminLogin(payload = {}) {
+  if (!ADMIN_LOGIN || !ADMIN_PASSWORD_HASH || !ADMIN_TOKEN) return false;
   return payload.login === ADMIN_LOGIN && constantTimeTextEqual(sha256Hex(payload.password || ""), ADMIN_PASSWORD_HASH);
 }
 
@@ -1141,7 +1122,7 @@ export function adminSessionPayload() {
 export function isAdminRequest(event) {
   const authorization = event.headers?.authorization || event.headers?.Authorization || "";
   const [, token = ""] = authorization.match(/^Bearer\s+(.+)$/i) || [];
-  return Boolean(token) && constantTimeTextEqual(token, ADMIN_TOKEN);
+  return Boolean(token && ADMIN_TOKEN) && constantTimeTextEqual(token, ADMIN_TOKEN);
 }
 
 async function ensureDefaultPrograms() {

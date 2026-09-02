@@ -194,9 +194,9 @@ select:focus {
   background:
     linear-gradient(
       0deg,
-      rgba(0, 0, 0, 0.78) 0%,
-      rgba(0, 0, 0, 0.52) 50%,
-      rgba(0, 0, 0, 0.3) 100%
+      rgba(0, 0, 0, 0.88) 0%,
+      rgba(0, 0, 0, 0.66) 50%,
+      rgba(0, 0, 0, 0.44) 100%
     );
 }
 
@@ -726,6 +726,8 @@ select:focus {
 }
 
 .radio-copy-card {
+  position: relative;
+  isolation: isolate;
   display: grid;
   width: 100%;
   max-width: 532px;
@@ -733,12 +735,20 @@ select:focus {
   overflow: clip;
   overflow-clip-margin: 18px;
   padding: clamp(15px, 2.24vw, 29px);
-  border: 1px solid var(--glass-border);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background:
+    radial-gradient(circle at 16% 18%, rgba(47, 232, 138, 0.17), transparent 38%),
+    radial-gradient(circle at 92% 92%, rgba(243, 203, 79, 0.095), transparent 42%),
+    linear-gradient(100deg, rgba(15, 96, 46, 0.18), rgba(243, 203, 79, 0.06) 48%, rgba(14, 72, 34, 0.16)),
+    rgba(3, 7, 4, 0.68);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.34),
+    0 0 32px rgba(47, 232, 138, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -56px 92px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(6px) saturate(1.07);
+  -webkit-backdrop-filter: blur(6px) saturate(1.07);
   contain: layout;
 }
 
@@ -1191,11 +1201,17 @@ select:focus {
   gap: 10px;
   align-items: center;
   padding: 7px;
-  border: 1px solid var(--glass-border);
+  border: 1px solid rgba(255, 255, 255, 0.085);
   border-radius: 8px;
-  background: var(--glass-bg-soft);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background:
+    radial-gradient(circle at 14% 14%, rgba(47, 232, 138, 0.09), transparent 48%),
+    linear-gradient(100deg, rgba(15, 96, 46, 0.11), rgba(243, 203, 79, 0.035) 48%, rgba(14, 72, 34, 0.1)),
+    rgba(3, 7, 4, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -22px 46px rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(5px) saturate(1.04);
+  -webkit-backdrop-filter: blur(5px) saturate(1.04);
 }
 
 .track-line img {
@@ -1737,11 +1753,16 @@ select:focus {
 .radio-page .radio-copy-card,
 .radio-page .track-line,
 .radio-page .radio-inline-ad-card {
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(2, 7, 3, 0.12);
-  box-shadow: none;
-  backdrop-filter: blur(2px) saturate(1.02);
-  -webkit-backdrop-filter: blur(2px) saturate(1.02);
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 14% 20%, rgba(47, 232, 138, 0.12), transparent 34%),
+    linear-gradient(100deg, rgba(15, 96, 46, 0.12), rgba(243, 203, 79, 0.05) 48%, rgba(14, 72, 34, 0.1)),
+    rgba(3, 7, 4, 0.48);
+  box-shadow:
+    0 12px 34px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 
 .radio-page .radio-copy-card::before,

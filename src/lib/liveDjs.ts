@@ -1,4 +1,4 @@
-import type { BroadcastState, NowPlayingResponse } from "../types";
+import type { LiveStatusSimulation, NowPlayingResponse } from "../types";
 
 export type StationDj = {
   id: string;
@@ -20,22 +20,20 @@ export type DjsPayload = {
   message?: string;
 };
 
-export type LiveStatusTestPayload = {
-  state: BroadcastState | "off";
-  djName?: string;
-  programName?: string;
-  listeners?: number;
-  visitors?: number;
-  movementPercent?: number;
-  liveBoostPercent?: number;
-  growthPercent?: number;
-  seed?: number;
-  updatedAt?: string;
-};
+export type LiveStatusTestPayload = LiveStatusSimulation;
 
 export type LiveStatusResolvedMetrics = {
   listeners: number;
   visitors: number;
+};
+
+export type LiveStatusTestSource = "database" | "local" | "fallback";
+
+export type LiveStatusTestResponse = {
+  liveStatusTest: LiveStatusTestPayload;
+  source: LiveStatusTestSource;
+  fetchedAt: string;
+  message?: string;
 };
 
 type ApiDjsPayload = {
@@ -44,6 +42,7 @@ type ApiDjsPayload = {
   message?: string;
   djs?: Partial<StationDj>[];
   dj?: Partial<StationDj> | null;
+  liveStatusTest?: Partial<LiveStatusTestPayload> | null;
   fetchedAt?: string;
 };
 
@@ -145,6 +144,46 @@ export async function deleteRemoteDj(token: string, id: string) {
     method: "DELETE",
     headers: authHeaders(token),
   });
+}
+
+export async function fetchLiveStatusTest(signal?: AbortSignal): Promise<LiveStatusTestResponse> {
+  try {
+    const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", { signal });
+    return {
+      liveStatusTest: normalizeLiveStatusTest(payload.liveStatusTest || { state: "off" }),
+      source: payload.source === "database" ? "database" : "fallback",
+      fetchedAt: payload.fetchedAt || new Date().toISOString(),
+      message: payload.message,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Simulação indisponível.";
+    return canUseLocalFallback()
+      ? localLiveStatusPayload(message)
+      : {
+          liveStatusTest: normalizeLiveStatusTest({ state: "off" }),
+          source: "fallback",
+          fetchedAt: new Date().toISOString(),
+          message,
+        };
+  }
+}
+
+export async function saveRemoteLiveStatusTest(token: string, liveStatusTest: LiveStatusTestPayload) {
+  const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ liveStatusTest }),
+  });
+  return normalizeLiveStatusTest(payload.liveStatusTest || liveStatusTest);
+}
+
+export function localLiveStatusPayload(message?: string): LiveStatusTestResponse {
+  return {
+    liveStatusTest: readLiveStatusTest(),
+    source: "local",
+    fetchedAt: new Date().toISOString(),
+    message,
+  };
 }
 
 export function readLiveStatusTest(): LiveStatusTestPayload {
@@ -290,7 +329,7 @@ function normalizeSignatures(value: string) {
     .join("\n");
 }
 
-function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>): LiveStatusTestPayload {
+export function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>): LiveStatusTestPayload {
   const state = ["online", "connecting", "offline", "live", "off"].includes(String(payload.state))
     ? payload.state as LiveStatusTestPayload["state"]
     : "off";
@@ -326,6 +365,11 @@ function normalizeDateMs(value: unknown) {
   const date = new Date(String(value));
   const time = date.getTime();
   return Number.isNaN(time) ? null : time;
+}
+
+function canUseLocalFallback() {
+  if (typeof window === "undefined") return false;
+  return window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 }
 
 function sortDjs(left: StationDj, right: StationDj) {

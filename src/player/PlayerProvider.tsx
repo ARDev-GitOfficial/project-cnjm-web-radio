@@ -59,6 +59,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const filtersRef = useRef<BiquadFilterNode[] | null>(null);
   const lastNowPlayingRefreshRef = useRef(0);
+  const liveStatusTestRef = useRef<LiveStatusTestPayload>(readLiveStatusTest());
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -83,9 +84,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const refreshNowPlaying = useCallback(async () => {
     const data = await fetchNowPlaying();
-    setNowPlaying(applyLiveStatusTest(data, readLiveStatusTest()));
+    const nextTest = data.liveStatusTest || readLiveStatusTest();
+    liveStatusTestRef.current = nextTest;
+    setLiveStatusTest(nextTest);
+    setNowPlaying(applyLiveStatusTest(data, nextTest));
     lastNowPlayingRefreshRef.current = Date.now();
   }, []);
+
+  useEffect(() => {
+    liveStatusTestRef.current = liveStatusTest;
+  }, [liveStatusTest]);
 
   useEffect(() => {
     const updateTest = () => {
@@ -108,7 +116,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      const nextTest = readLiveStatusTest();
+      const nextTest = liveStatusTestRef.current;
       if (nextTest.state === "off") return;
 
       setLiveStatusTest(nextTest);

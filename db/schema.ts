@@ -61,3 +61,17 @@ export const stationDjs = pgTable("station_djs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const liveStatusSimulation = pgTable("live_status_simulation", {
+  id: text("id").primaryKey().default("global"),
+  state: text("state").notNull().default("off"),
+  djName: text("dj_name").notNull().default("DJ Leo"),
+  programName: text("program_name").notNull().default("Roots Strike"),
+  listeners: integer("listeners").notNull().default(2),
+  visitors: integer("visitors").notNull().default(49823),
+  movementPercent: integer("movement_percent").notNull().default(32),
+  liveBoostPercent: integer("live_boost_percent").notNull().default(65),
+  growthPercent: integer("growth_percent").notNull().default(12),
+  seed: integer("seed").notNull().default(731),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

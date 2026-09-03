@@ -32,6 +32,19 @@ export type LiveDjStatus = {
   source: "autodj" | "dj" | "test" | "fallback";
 };
 
+export type LiveStatusSimulation = {
+  state: BroadcastState | "off";
+  djName?: string;
+  programName?: string;
+  listeners?: number;
+  visitors?: number;
+  movementPercent?: number;
+  liveBoostPercent?: number;
+  growthPercent?: number;
+  seed?: number;
+  updatedAt?: string;
+};
+
 export type HistoryItem = {
   id: string;
   time: string;
@@ -47,6 +60,7 @@ export type NowPlayingResponse = {
   track: Track;
   stats: StreamStats;
   liveDj: LiveDjStatus;
+  liveStatusTest?: LiveStatusSimulation | null;
   history: HistoryItem[];
   fetchedAt: string;
   message?: string;

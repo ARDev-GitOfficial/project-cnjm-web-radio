@@ -77,6 +77,7 @@ import {
   deleteRemoteDj,
   emptyDj,
   fetchAdminDjs,
+  fetchLiveStatusTest,
   loadDjs,
   LIVE_TEST_DEFAULT_LISTENERS,
   LIVE_TEST_DEFAULT_LIVE_BOOST,
@@ -88,12 +89,14 @@ import {
   LIVE_TEST_MAX_PERCENT,
   LIVE_TEST_MAX_VISITORS,
   localDjsPayload,
+  localLiveStatusPayload,
   nextLiveStatusTest,
   normalizeDj,
   readLiveStatusTest,
   resolveLiveStatusTestMetrics,
   saveDjs,
   saveRemoteDj,
+  saveRemoteLiveStatusTest,
   writeLiveStatusTest,
   type DjsPayload,
   type LiveStatusTestPayload,
@@ -249,6 +252,20 @@ export function AdsAdminPage() {
       }
     },
   });
+  const { data: liveStatusData, isFetching: isFetchingLiveStatus } = useQuery({
+    queryKey: ["live-status-admin", session?.token, session?.source],
+    enabled: Boolean(session),
+    queryFn: async ({ signal }) => {
+      if (!session) return localLiveStatusPayload();
+      if (session.source === "local") {
+        return canUseLocalFallback()
+          ? localLiveStatusPayload()
+          : localLiveStatusPayload("Sessão local não é permitida no site publicado.");
+      }
+
+      return fetchLiveStatusTest(signal);
+    },
+  });
 
   const ads = data?.ads ?? [];
   const settings = data?.settings ?? loadAdSettings();
@@ -258,8 +275,12 @@ export function AdsAdminPage() {
   const isRemote = Boolean(session && data?.source === "database");
   const isLocalMode = Boolean(session && data?.source === "local");
   const isDisconnected = Boolean(session && data?.source === "fallback");
-  const canManageLocalMetrics = Boolean(session && canUseLocalFallback());
+  const canManageLiveMetrics = Boolean(session && (session.source === "database" || canUseLocalFallback()));
+  const isLiveMetricsRemote = Boolean(session?.source === "database");
   const canEditAds = isRemote || isLocalMode;
+  const liveMetricsScopeText = isLiveMetricsRemote
+    ? "Controle como os números aparecem no topo do site publicado. As alterações valem para todos os visitantes."
+    : "Controle como os números aparecem no topo do site durante testes locais, sem salvar nada no banco global.";
   const environmentNotice = isLocalMode
     ? "Ambiente local ativo para testes. Os anúncios salvos aqui ficam apenas neste navegador."
     : isDisconnected
@@ -278,6 +299,21 @@ export function AdsAdminPage() {
   );
   const visitWaveBars = useMemo(() => makeVisitWaveBars(liveTest, simulationNow), [liveTest, simulationNow]);
   const isSimulationActive = liveTest.state !== "off";
+
+  useEffect(() => {
+    if (!liveStatusData?.liveStatusTest) return;
+    setLiveTest(liveStatusData.liveStatusTest);
+    setSimulationNow(Date.now());
+  }, [
+    liveStatusData?.liveStatusTest?.state,
+    liveStatusData?.liveStatusTest?.listeners,
+    liveStatusData?.liveStatusTest?.visitors,
+    liveStatusData?.liveStatusTest?.movementPercent,
+    liveStatusData?.liveStatusTest?.liveBoostPercent,
+    liveStatusData?.liveStatusTest?.growthPercent,
+    liveStatusData?.liveStatusTest?.seed,
+    liveStatusData?.liveStatusTest?.updatedAt,
+  ]);
 
   useEffect(() => {
     setLiveMetricDraft(liveMetricDraftFromPayload(liveTest));
@@ -325,6 +361,7 @@ export function AdsAdminPage() {
     void queryClient.invalidateQueries({ queryKey: ["public-ads"] });
     void queryClient.invalidateQueries({ queryKey: ["programs-admin"] });
     void queryClient.invalidateQueries({ queryKey: ["djs-admin"] });
+    void queryClient.invalidateQueries({ queryKey: ["live-status-admin"] });
   };
 
   const persistLocalAds = (nextAds: SiteAd[]) => {
@@ -808,24 +845,43 @@ export function AdsAdminPage() {
     }
   };
 
-  const cycleLiveStatusTest = () => {
-    const next = nextLiveStatusTest(liveTest, djs.find((dj) => dj.active));
-    writeLiveStatusTest(next);
-    setLiveTest(next);
-    if (next.state === "off") {
-      setActionMessage("Modo de teste desligado. A rádio voltou a usar os dados reais.");
+  const persistLiveStatusTest = async (next: LiveStatusTestPayload, successMessage: string) => {
+    if (!canManageLiveMetrics || !session) {
+      setActionMessage("Conecte o banco global antes de alterar as visitas.");
       return;
     }
-    setActionMessage(
-      next.state === "live"
-        ? `Teste aplicado: NO AR com ${next.djName} / ${next.programName}.`
-        : `Teste aplicado: ${liveTestLabel(next.state)}.`,
+
+    try {
+      const saved = session.source === "database"
+        ? await saveRemoteLiveStatusTest(session.token, next)
+        : next;
+      writeLiveStatusTest(saved);
+      const normalized = readLiveStatusTest();
+      setLiveTest(normalized);
+      setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
+      setSimulationNow(Date.now());
+      setActionMessage(successMessage);
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar a simulação.");
+    }
+  };
+
+  const cycleLiveStatusTest = async () => {
+    const next = nextLiveStatusTest(liveTest, djs.find((dj) => dj.active));
+    await persistLiveStatusTest(
+      next,
+      next.state === "off"
+        ? "Modo de teste desligado. A rádio voltou a usar os dados reais."
+        : next.state === "live"
+          ? `Teste aplicado: NO AR com ${next.djName} / ${next.programName}.`
+          : `Teste aplicado: ${liveTestLabel(next.state)}.`,
     );
   };
 
-  const applyLiveMetricTest = () => {
-    if (!canManageLocalMetrics) {
-      setActionMessage("Esse controle fica disponível apenas no teste local.");
+  const applyLiveMetricTest = async () => {
+    if (!canManageLiveMetrics) {
+      setActionMessage("Conecte o banco global antes de alterar as visitas.");
       return;
     }
 
@@ -866,17 +922,17 @@ export function AdsAdminPage() {
       updatedAt: new Date().toISOString(),
     };
 
-    writeLiveStatusTest(next);
-    const normalized = readLiveStatusTest();
-    setLiveTest(normalized);
-    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
-    setSimulationNow(Date.now());
-    setActionMessage("Visualizações e visitas locais aplicadas no site.");
+    await persistLiveStatusTest(
+      next,
+      session?.source === "database"
+        ? "Visualizações e visitas aplicadas no site publicado."
+        : "Visualizações e visitas locais aplicadas no site.",
+    );
   };
 
-  const changeLiveSimulationState = (state: LiveStatusTestPayload["state"]) => {
-    if (!canManageLocalMetrics) {
-      setActionMessage("Esse controle fica disponível apenas no teste local.");
+  const changeLiveSimulationState = async (state: LiveStatusTestPayload["state"]) => {
+    if (!canManageLiveMetrics) {
+      setActionMessage("Conecte o banco global antes de alterar as visitas.");
       return;
     }
 
@@ -887,17 +943,17 @@ export function AdsAdminPage() {
       updatedAt: state === "off" ? liveTest.updatedAt : new Date().toISOString(),
     };
 
-    writeLiveStatusTest(next);
-    const normalized = readLiveStatusTest();
-    setLiveTest(normalized);
-    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
-    setSimulationNow(Date.now());
-    setActionMessage(state === "off" ? "Simulação local desligada." : `Simulação local em estado: ${liveTestLabel(state)}.`);
+    await persistLiveStatusTest(
+      next,
+      state === "off"
+        ? "Simulação desligada. O site voltou aos dados reais."
+        : `Simulação em estado: ${liveTestLabel(state)}.`,
+    );
   };
 
-  const shuffleLiveSimulation = () => {
-    if (!canManageLocalMetrics) {
-      setActionMessage("Esse controle fica disponível apenas no teste local.");
+  const shuffleLiveSimulation = async () => {
+    if (!canManageLiveMetrics) {
+      setActionMessage("Conecte o banco global antes de alterar as visitas.");
       return;
     }
 
@@ -908,14 +964,10 @@ export function AdsAdminPage() {
       updatedAt: new Date().toISOString(),
     };
 
-    writeLiveStatusTest(next);
-    const normalized = readLiveStatusTest();
-    setLiveTest(normalized);
-    setSimulationNow(Date.now());
-    setActionMessage("Nova variação local gerada.");
+    await persistLiveStatusTest(next, "Nova variação gerada.");
   };
 
-  const resetLiveMetricTest = () => {
+  const resetLiveMetricTest = async () => {
     const next: LiveStatusTestPayload = {
       ...liveTest,
       state: "off",
@@ -928,12 +980,7 @@ export function AdsAdminPage() {
       updatedAt: new Date().toISOString(),
     };
 
-    writeLiveStatusTest(next);
-    const normalized = readLiveStatusTest();
-    setLiveTest(normalized);
-    setLiveMetricDraft(liveMetricDraftFromPayload(normalized));
-    setSimulationNow(Date.now());
-    setActionMessage("Simulação local desligada. O site voltou aos dados reais.");
+    await persistLiveStatusTest(next, "Simulação desligada. O site voltou aos dados reais.");
   };
 
   if (!session) {
@@ -1001,7 +1048,7 @@ export function AdsAdminPage() {
             {isRemote ? <Database size={15} /> : isLocalMode ? <HardDrive size={15} /> : <AlertTriangle size={15} />}
             {isRemote ? "Banco global" : isLocalMode ? "Modo local" : "Banco pendente"}
           </span>
-          <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms || isFetchingDjs}>
+          <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus}>
             <RefreshCw size={16} /> Atualizar
           </button>
           <button className="ghost-button" type="button" onClick={logout}>
@@ -1110,7 +1157,7 @@ export function AdsAdminPage() {
                   ? "Simulação desligada"
                   : `${formatAdminNumber(resolvedLiveMetrics.listeners)} online`}
               </strong>
-              <p>{liveTest.state === "off" ? "Abra a central para simular público no ambiente local." : `${formatAdminNumber(resolvedLiveMetrics.visitors)} visitantes no topo agora.`}</p>
+              <p>{liveTest.state === "off" ? "Abra a central para controlar o público exibido no topo." : `${formatAdminNumber(resolvedLiveMetrics.visitors)} visitantes no topo agora.`}</p>
               <div className="live-test-actions">
                 <NavLink className="ghost-button" to={adminPanelRoutes.visits}>
                   <SlidersHorizontal size={16} /> Abrir central
@@ -1128,8 +1175,8 @@ export function AdsAdminPage() {
               <span>
                 <UsersRound size={15} /> Central de visitas
               </span>
-              <h2>Gerenciamento local de público</h2>
-              <p>Controle como os números aparecem no topo do site durante testes locais, sem salvar nada no banco global.</p>
+              <h2>{isLiveMetricsRemote ? "Gerenciamento global de público" : "Gerenciamento local de público"}</h2>
+              <p>{liveMetricsScopeText}</p>
             </div>
             <div className={isSimulationActive ? "visit-live-badge is-active" : "visit-live-badge"}>
               <span>{isSimulationActive ? liveTestLabel(liveTest.state) : "Dados reais"}</span>
@@ -1179,7 +1226,7 @@ export function AdsAdminPage() {
                     className={liveTest.state === state ? "visit-status-button is-active" : "visit-status-button"}
                     type="button"
                     onClick={() => changeLiveSimulationState(state)}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   >
                     <Icon size={16} />
                     {label}
@@ -1199,7 +1246,7 @@ export function AdsAdminPage() {
                       const { value } = event.currentTarget;
                       setLiveMetricDraft((current) => ({ ...current, listeners: value }));
                     }}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   />
                 </label>
                 <label>
@@ -1213,7 +1260,7 @@ export function AdsAdminPage() {
                       const { value } = event.currentTarget;
                       setLiveMetricDraft((current) => ({ ...current, visitors: value }));
                     }}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   />
                 </label>
               </div>
@@ -1230,7 +1277,7 @@ export function AdsAdminPage() {
                       const { value } = event.currentTarget;
                       setLiveMetricDraft((current) => ({ ...current, movementPercent: value }));
                     }}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   />
                 </label>
                 <label>
@@ -1244,7 +1291,7 @@ export function AdsAdminPage() {
                       const { value } = event.currentTarget;
                       setLiveMetricDraft((current) => ({ ...current, liveBoostPercent: value }));
                     }}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   />
                 </label>
                 <label>
@@ -1258,19 +1305,19 @@ export function AdsAdminPage() {
                       const { value } = event.currentTarget;
                       setLiveMetricDraft((current) => ({ ...current, growthPercent: value }));
                     }}
-                    disabled={!canManageLocalMetrics}
+                    disabled={!canManageLiveMetrics}
                   />
                 </label>
               </div>
 
               <div className="visit-control-actions">
-                <button className="play-main slim" type="button" onClick={applyLiveMetricTest} disabled={!canManageLocalMetrics}>
-                  <Save size={16} /> Aplicar no local
+                <button className="play-main slim" type="button" onClick={applyLiveMetricTest} disabled={!canManageLiveMetrics}>
+                  <Save size={16} /> {isLiveMetricsRemote ? "Aplicar no site" : "Aplicar no local"}
                 </button>
-                <button className="ghost-button" type="button" onClick={shuffleLiveSimulation} disabled={!canManageLocalMetrics}>
+                <button className="ghost-button" type="button" onClick={shuffleLiveSimulation} disabled={!canManageLiveMetrics}>
                   <RefreshCw size={16} /> Nova variação
                 </button>
-                <button className="ghost-button" type="button" onClick={resetLiveMetricTest} disabled={!canManageLocalMetrics || liveTest.state === "off"}>
+                <button className="ghost-button" type="button" onClick={resetLiveMetricTest} disabled={!canManageLiveMetrics || liveTest.state === "off"}>
                   <Power size={16} /> Dados reais
                 </button>
               </div>

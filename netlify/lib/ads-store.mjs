@@ -8,6 +8,16 @@ const MAX_ADS = 100;
 const MAX_DJS = 100;
 const PROGRAM_LOGO_MAX_SIZE = 2_500_000;
 const PROGRAM_LOGO_MAX_DIMENSION = 1800;
+const LIVE_TEST_DEFAULT_LISTENERS = 2;
+const LIVE_TEST_DEFAULT_VISITORS = 49_823;
+const LIVE_TEST_DEFAULT_MOVEMENT = 32;
+const LIVE_TEST_DEFAULT_LIVE_BOOST = 65;
+const LIVE_TEST_DEFAULT_GROWTH = 12;
+const LIVE_TEST_MAX_LISTENERS = 999_999;
+const LIVE_TEST_MAX_VISITORS = 9_999_999;
+const LIVE_TEST_MAX_PERCENT = 200;
+const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
+const LIVE_TEST_STATES = new Set(["online", "connecting", "offline", "live", "off"]);
 const ADS_BLOB_STORE = "cnjm-ad-images";
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
@@ -252,6 +262,22 @@ export function normalizeDjPayload(dj = {}) {
   };
 }
 
+export function normalizeLiveStatusPayload(payload = {}) {
+  const state = LIVE_TEST_STATES.has(String(payload.state)) ? String(payload.state) : "off";
+  return {
+    state,
+    djName: String(payload.djName || "DJ Leo").trim(),
+    programName: String(payload.programName || "Roots Strike").trim(),
+    listeners: normalizeRunCount(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS),
+    visitors: normalizeRunCount(payload.visitors, LIVE_TEST_DEFAULT_VISITORS, 0, LIVE_TEST_MAX_VISITORS),
+    movementPercent: normalizeRunCount(payload.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+    liveBoostPercent: normalizeRunCount(payload.liveBoostPercent, LIVE_TEST_DEFAULT_LIVE_BOOST, 0, LIVE_TEST_MAX_PERCENT),
+    growthPercent: normalizeRunCount(payload.growthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    seed: normalizeRunCount(payload.seed, 731, 1, 999_999),
+    updatedAt: normalizeIso(payload.updatedAt) || new Date(),
+  };
+}
+
 function serializeAd(row) {
   return {
     id: row.id,
@@ -319,6 +345,92 @@ function serializeDj(row) {
     sortOrder: Number(row.sortOrder || 0),
     createdAt: iso(row.createdAt) || new Date().toISOString(),
     updatedAt: iso(row.updatedAt) || new Date().toISOString(),
+  };
+}
+
+function serializeLiveStatus(row) {
+  const normalized = normalizeLiveStatusPayload({
+    state: row?.state,
+    djName: row?.djName,
+    programName: row?.programName,
+    listeners: row?.listeners,
+    visitors: row?.visitors,
+    movementPercent: row?.movementPercent,
+    liveBoostPercent: row?.liveBoostPercent,
+    growthPercent: row?.growthPercent,
+    seed: row?.seed,
+    updatedAt: row?.updatedAt,
+  });
+
+  return {
+    ...normalized,
+    updatedAt: iso(normalized.updatedAt) || new Date().toISOString(),
+  };
+}
+
+export function resolveLiveStatusMetrics(payload, nowMs = Date.now()) {
+  const test = serializeLiveStatus(payload);
+  const baseListeners = test.listeners ?? LIVE_TEST_DEFAULT_LISTENERS;
+  const baseVisitors = test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
+  const movement = (test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
+  const liveBoost = test.state === "live" ? (test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST) / 100 : 0;
+  const growth = (test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH) / 100;
+  const startedAt = new Date(test.updatedAt).getTime();
+  const elapsedMinutes = Number.isNaN(startedAt) ? 0 : Math.max(0, (nowMs - startedAt) / 60_000);
+  const seed = (test.seed ?? 731) / 97;
+  const seconds = nowMs / 1000;
+  const wave = Math.sin(seconds / 9 + seed) * 0.56 + Math.sin(seconds / 23 + seed * 1.8) * 0.32;
+  const softWave = (wave + 1) / 2;
+  const stateFactor = test.state === "connecting" ? 0.62 : 1;
+  const listenerMovement = 1 + wave * 0.3 * movement;
+  const visitorGrowth = 1 + Math.min(0.72, (elapsedMinutes / 240) * growth);
+  const visitorPulse = 1 + softWave * 0.045 * movement + liveBoost * 0.34;
+  const listeners = test.state === "offline" || test.state === "off"
+    ? 0
+    : normalizeRunCount(baseListeners * stateFactor * listenerMovement * (1 + liveBoost), 0, 0, LIVE_TEST_MAX_LISTENERS);
+  const visitors = test.state === "off"
+    ? baseVisitors
+    : normalizeRunCount(baseVisitors * visitorGrowth * visitorPulse, baseVisitors, 0, LIVE_TEST_MAX_VISITORS);
+
+  return { listeners, visitors };
+}
+
+export function applyLiveStatusSimulation(data, payload) {
+  const test = serializeLiveStatus(payload);
+  if (test.state === "off") return { ...data, liveStatusTest: test };
+
+  const { listeners, visitors } = resolveLiveStatusMetrics(test);
+  const liveDj = {
+    state: test.state,
+    isLive: test.state === "live",
+    djName: test.state === "live" ? test.djName || "DJ Leo" : null,
+    programName: test.state === "live" ? test.programName || "Roots Strike" : null,
+    matchedSignature: "modo-global",
+    detectedValue: "simulação global",
+    source: "test",
+  };
+
+  return {
+    ...data,
+    ok: test.state !== "offline",
+    stats: {
+      ...data.stats,
+      listeners,
+      peakListeners: Math.max(Number(data.stats?.peakListeners || 0), listeners),
+      uniqueListeners: Math.max(Number(data.stats?.uniqueListeners || 0), listeners),
+      streamHits: visitors,
+      isOnline: test.state !== "offline",
+    },
+    liveDj,
+    track: test.state === "live"
+      ? {
+          ...data.track,
+          title: liveDj.programName || "Programa Ao Vivo",
+          artist: liveDj.djName || "DJ ao vivo",
+          raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
+        }
+      : data.track,
+    liveStatusTest: test,
   };
 }
 
@@ -794,6 +906,117 @@ export async function listPublicDjs() {
 
   const { djs } = await refreshPublicDataCache();
   return djs;
+}
+
+let liveStatusTableReady = false;
+
+async function ensureLiveStatusTable() {
+  if (liveStatusTableReady) return;
+
+  await db()`
+    CREATE TABLE IF NOT EXISTS live_status_simulation (
+      id TEXT PRIMARY KEY DEFAULT 'global',
+      state TEXT NOT NULL DEFAULT 'off',
+      dj_name TEXT NOT NULL DEFAULT 'DJ Leo',
+      program_name TEXT NOT NULL DEFAULT 'Roots Strike',
+      listeners INTEGER NOT NULL DEFAULT 2,
+      visitors INTEGER NOT NULL DEFAULT 49823,
+      movement_percent INTEGER NOT NULL DEFAULT 32,
+      live_boost_percent INTEGER NOT NULL DEFAULT 65,
+      growth_percent INTEGER NOT NULL DEFAULT 12,
+      seed INTEGER NOT NULL DEFAULT 731,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `;
+
+  await db()`
+    INSERT INTO live_status_simulation (id)
+    VALUES ('global')
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  liveStatusTableReady = true;
+}
+
+export async function getLiveStatusTest() {
+  await ensureLiveStatusTable();
+
+  const rows = await db()`
+    SELECT
+      state,
+      dj_name AS "djName",
+      program_name AS "programName",
+      listeners,
+      visitors,
+      movement_percent AS "movementPercent",
+      live_boost_percent AS "liveBoostPercent",
+      growth_percent AS "growthPercent",
+      seed,
+      updated_at AS "updatedAt"
+    FROM live_status_simulation
+    WHERE id = 'global'
+    LIMIT 1
+  `;
+
+  return serializeLiveStatus(rows[0]);
+}
+
+export async function saveLiveStatusTest(payload) {
+  await ensureLiveStatusTable();
+
+  const normalized = normalizeLiveStatusPayload(payload);
+  const [row] = await db()`
+    INSERT INTO live_status_simulation (
+      id,
+      state,
+      dj_name,
+      program_name,
+      listeners,
+      visitors,
+      movement_percent,
+      live_boost_percent,
+      growth_percent,
+      seed,
+      updated_at
+    )
+    VALUES (
+      'global',
+      ${normalized.state},
+      ${normalized.djName},
+      ${normalized.programName},
+      ${normalized.listeners},
+      ${normalized.visitors},
+      ${normalized.movementPercent},
+      ${normalized.liveBoostPercent},
+      ${normalized.growthPercent},
+      ${normalized.seed},
+      ${normalized.updatedAt}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      state = EXCLUDED.state,
+      dj_name = EXCLUDED.dj_name,
+      program_name = EXCLUDED.program_name,
+      listeners = EXCLUDED.listeners,
+      visitors = EXCLUDED.visitors,
+      movement_percent = EXCLUDED.movement_percent,
+      live_boost_percent = EXCLUDED.live_boost_percent,
+      growth_percent = EXCLUDED.growth_percent,
+      seed = EXCLUDED.seed,
+      updated_at = EXCLUDED.updated_at
+    RETURNING
+      state,
+      dj_name AS "djName",
+      program_name AS "programName",
+      listeners,
+      visitors,
+      movement_percent AS "movementPercent",
+      live_boost_percent AS "liveBoostPercent",
+      growth_percent AS "growthPercent",
+      seed,
+      updated_at AS "updatedAt"
+  `;
+
+  return serializeLiveStatus(row);
 }
 
 export async function listAdminPrograms() {

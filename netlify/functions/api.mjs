@@ -1,10 +1,12 @@
 import { connectLambda } from "@netlify/blobs";
 import {
   adminSessionPayload,
+  applyLiveStatusSimulation,
   deleteAd,
   deleteDj,
   deleteProgram,
   getAdSettings,
+  getLiveStatusTest,
   isAdminRequest,
   isValidAdminLogin,
   listAdminAds,
@@ -18,6 +20,7 @@ import {
   saveAdImage,
   saveAdSettings,
   saveDj,
+  saveLiveStatusTest,
   saveProgram,
   saveProgramLogo,
   updateAdStats,
@@ -710,11 +713,12 @@ function parseChatMessages(html) {
 
 async function handleNowPlaying() {
   try {
-    const [stats, historyHtml, coverUrl, djs] = await Promise.all([
+    const [stats, historyHtml, coverUrl, djs, liveStatusTest] = await Promise.all([
       fetchStreamStats(),
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
       listPublicDjs(),
+      getLiveStatusTest().catch(() => ({ state: "off" })),
     ]);
     const history = parseHistory(historyHtml);
     const rawSongTitle = stats.songtitle ?? "";
@@ -729,7 +733,7 @@ async function handleNowPlaying() {
         }
       : track;
 
-    return json(200, {
+    return json(200, applyLiveStatusSimulation({
       ok: true,
       source: "live",
       track: displayTrack,
@@ -747,9 +751,10 @@ async function handleNowPlaying() {
       liveDj,
       history: history.length > 0 ? history : safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
-    }, nowPlayingCacheHeaders);
+    }, liveStatusTest), nowPlayingCacheHeaders);
   } catch {
-    return json(200, {
+    const liveStatusTest = await getLiveStatusTest().catch(() => ({ state: "off" }));
+    return json(200, applyLiveStatusSimulation({
       ok: false,
       source: "fallback",
       track: {
@@ -779,7 +784,7 @@ async function handleNowPlaying() {
       history: safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
       message: "Dados ao vivo indisponíveis no momento.",
-    }, nowPlayingCacheHeaders);
+    }, liveStatusTest), nowPlayingCacheHeaders);
   }
 }
 
@@ -1193,6 +1198,50 @@ async function handleDjs(event, pathname) {
   return json(404, { ok: false, message: "Endpoint de DJs não encontrado." });
 }
 
+async function handleLiveStatusTest(event, pathname) {
+  const method = event.httpMethod || "GET";
+  if (pathname !== "/live-status-test") return json(404, { ok: false, message: "Endpoint de visitas não encontrado." });
+
+  if (method === "GET") {
+    try {
+      const liveStatusTest = await getLiveStatusTest();
+      return json(200, {
+        ok: true,
+        source: "database",
+        liveStatusTest,
+        fetchedAt: new Date().toISOString(),
+      }, nowPlayingCacheHeaders);
+    } catch (error) {
+      return json(200, {
+        ok: false,
+        source: "fallback",
+        liveStatusTest: { state: "off" },
+        fetchedAt: new Date().toISOString(),
+        message: error instanceof Error && error.message ? error.message : "Simulação indisponível.",
+      }, nowPlayingCacheHeaders);
+    }
+  }
+
+  if (method === "PUT" || method === "POST") {
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const payload = readJsonBody(event);
+      const liveStatusTest = await saveLiveStatusTest(payload.liveStatusTest ?? payload);
+      return json(200, {
+        ok: true,
+        source: "database",
+        liveStatusTest,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      return serverError(error, "Não foi possível salvar a simulação.");
+    }
+  }
+
+  return methodNotAllowed();
+}
+
 export async function handler(event) {
   connectNetlifyBlobs(event);
 
@@ -1204,6 +1253,7 @@ export async function handler(event) {
   if (pathname === "/ads" || pathname.startsWith("/ads/")) return handleAds(event, pathname);
   if (pathname === "/programs" || pathname.startsWith("/programs/")) return handlePrograms(event, pathname);
   if (pathname === "/djs" || pathname.startsWith("/djs/")) return handleDjs(event, pathname);
+  if (pathname === "/live-status-test") return handleLiveStatusTest(event, pathname);
 
   if (event.httpMethod && event.httpMethod !== "GET") {
     return methodNotAllowed();

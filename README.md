@@ -32,11 +32,11 @@ No Netlify, confirme:
 - as migrações em `netlify/database/migrations` foram enviadas;
 - as variáveis de admin foram configuradas no painel do site.
 
-## Métricas econômicas dos flyers
+## Métricas econômicas e audiência
 
-O site não grava exibições de anúncios nem simula visualizações públicas. Para reduzir chamadas ao Netlify e manter a métrica mais útil, apenas flyers com link registram toques/cliques em `/api/ads/:id/stats`.
+O site não grava exibições de anúncios. Para reduzir chamadas ao Netlify e manter a métrica mais útil, apenas flyers com link registram toques/cliques em `/api/ads/:id/stats`.
 
-O contador público exibido em `/api/now-playing`, dentro de `stats.streamHits`, vem diretamente do provedor de stream.
+A Central de Audiência em `/ads/visitas` controla a apresentação pública de ouvintes e visitas com rascunho, aplicação gradual, base global, regras por horário, perfis de DJ, acionamento manual de DJ ao vivo e agenda automática de entrada/saída. O app Android lê `/api/now-playing`, então herda os números e o status ao vivo publicados pelo site.
 
 ## Upload
 

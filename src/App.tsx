@@ -79,9 +79,9 @@ const routeSeo: Record<string, typeof defaultSeo> = {
       "Área restrita para administradores da Web Rádio Conexão Jamaica gerenciarem anúncios e patrocinadores.",
   },
   "/ads/visitas": {
-    title: "Visitas | Web Rádio Conexão Jamaica",
+    title: "Audiência | Web Rádio Conexão Jamaica",
     description:
-      "Área restrita para simulação local de ouvintes e visitantes da Web Rádio Conexão Jamaica.",
+      "Área restrita para gerenciamento de ouvintes e visitas da Web Rádio Conexão Jamaica.",
   },
 };
 

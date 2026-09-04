@@ -32,17 +32,82 @@ export type LiveDjStatus = {
   source: "autodj" | "dj" | "test" | "fallback";
 };
 
+export type AudienceScheduleProfile = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  dayIds: string[];
+  startTime: string;
+  endTime: string;
+  listenersMin: number;
+  listenersMax: number;
+  movementPercent: number;
+  exitPercent: number;
+  transitionPercent: number;
+  visitorGrowthPercent: number;
+};
+
+export type AudienceDjProfile = {
+  id: string;
+  enabled: boolean;
+  djName: string;
+  programName: string;
+  signatures: string;
+  listenersMin: number;
+  listenersMax: number;
+  movementPercent: number;
+  exitPercent: number;
+  transitionPercent: number;
+  liveBoostPercent: number;
+};
+
+export type ManualLiveDjSchedule = {
+  id: string;
+  stationDjId?: string | null;
+  enabled: boolean;
+  djName: string;
+  programName: string;
+  dayIds: string[];
+  startTime: string;
+  endTime: string;
+};
+
+export type ManualLiveDjControl = {
+  enabled: boolean;
+  active: boolean;
+  djName: string;
+  programName: string;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+  schedules: ManualLiveDjSchedule[];
+};
+
 export type LiveStatusSimulation = {
-  state: BroadcastState | "off";
+  state?: BroadcastState | "off";
+  enabled?: boolean;
+  mode?: "audience";
   djName?: string;
   programName?: string;
   listeners?: number;
   visitors?: number;
+  listenersMin?: number;
+  listenersMax?: number;
+  visitorBase?: number;
+  visitorTarget?: number | null;
   movementPercent?: number;
+  exitPercent?: number;
+  transitionPercent?: number;
   liveBoostPercent?: number;
   growthPercent?: number;
+  visitorGrowthPercent?: number;
+  rampFromListeners?: number;
+  rampFromVisitors?: number;
   seed?: number;
   updatedAt?: string;
+  appliedAt?: string;
+  scheduleProfiles?: AudienceScheduleProfile[];
+  djProfiles?: AudienceDjProfile[];
+  liveDjControl?: ManualLiveDjControl;
 };
 
 export type HistoryItem = {

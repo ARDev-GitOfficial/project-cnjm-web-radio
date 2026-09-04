@@ -1,4 +1,12 @@
-import type { LiveStatusSimulation, NowPlayingResponse } from "../types";
+import type {
+  AudienceDjProfile,
+  AudienceScheduleProfile,
+  LiveDjStatus,
+  LiveStatusSimulation,
+  ManualLiveDjControl,
+  ManualLiveDjSchedule,
+  NowPlayingResponse,
+} from "../types";
 
 export type StationDj = {
   id: string;
@@ -50,13 +58,34 @@ export const DJ_STORAGE_KEY = "cnjm-station-djs-v1";
 export const LIVE_STATUS_TEST_KEY = "cnjm-live-status-test-v1";
 export const LIVE_TEST_DEFAULT_LISTENERS = 2;
 export const LIVE_TEST_DEFAULT_VISITORS = 49_823;
+export const LIVE_TEST_DEFAULT_LISTENERS_MIN = 2;
+export const LIVE_TEST_DEFAULT_LISTENERS_MAX = 12;
 export const LIVE_TEST_DEFAULT_MOVEMENT = 32;
+export const LIVE_TEST_DEFAULT_EXIT = 36;
+export const LIVE_TEST_DEFAULT_TRANSITION = 58;
 export const LIVE_TEST_DEFAULT_LIVE_BOOST = 65;
 export const LIVE_TEST_DEFAULT_GROWTH = 12;
 export const LIVE_TEST_MAX_LISTENERS = 999_999;
 export const LIVE_TEST_MAX_VISITORS = 9_999_999;
 export const LIVE_TEST_MAX_PERCENT = 200;
 export const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
+export const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+type AudienceContext = {
+  liveDj?: LiveDjStatus | null;
+};
+
+type ActiveAudienceProfile = {
+  source: "global" | "schedule" | "dj";
+  label: string;
+  listenersMin: number;
+  listenersMax: number;
+  movementPercent: number;
+  exitPercent: number;
+  transitionPercent: number;
+  liveBoostPercent: number;
+  visitorGrowthPercent: number;
+};
 
 const API_BASE = "/api/djs";
 
@@ -100,7 +129,7 @@ export function loadDjs(): StationDj[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Partial<StationDj>[];
     if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeDj).filter((dj) => dj.djName && dj.programName && dj.signatures).sort(sortDjs);
+    return parsed.map(normalizeDj).filter((dj) => dj.djName && dj.programName).sort(sortDjs);
   } catch {
     return [];
   }
@@ -156,7 +185,7 @@ export async function fetchLiveStatusTest(signal?: AbortSignal): Promise<LiveSta
       message: payload.message,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Simulação indisponível.";
+    const message = error instanceof Error ? error.message : "Audiência indisponível.";
     return canUseLocalFallback()
       ? localLiveStatusPayload(message)
       : {
@@ -206,92 +235,108 @@ export function writeLiveStatusTest(payload: LiveStatusTestPayload) {
 
 export function nextLiveStatusTest(current: LiveStatusTestPayload, dj?: StationDj): LiveStatusTestPayload {
   const normalizedCurrent = normalizeLiveStatusTest(current);
-  const order: LiveStatusTestPayload["state"][] = ["online", "connecting", "offline", "live", "off"];
-  const currentIndex = Math.max(0, order.indexOf(current.state));
-  const nextState = order[(currentIndex + 1) % order.length] || "online";
   const sampleDj = dj && dj.djName && dj.programName
     ? dj
     : { djName: "DJ Leo", programName: "Roots Strike" };
 
   return {
-    state: nextState,
+    ...normalizedCurrent,
+    enabled: !normalizedCurrent.enabled,
+    state: normalizedCurrent.enabled ? "off" : "online",
     djName: sampleDj.djName,
     programName: sampleDj.programName,
-    listeners: normalizedCurrent.listeners,
-    visitors: normalizedCurrent.visitors,
-    movementPercent: normalizedCurrent.movementPercent,
-    liveBoostPercent: normalizedCurrent.liveBoostPercent,
-    growthPercent: normalizedCurrent.growthPercent,
-    seed: normalizedCurrent.seed,
-    updatedAt: normalizedCurrent.updatedAt,
+    appliedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 }
 
 export function resolveLiveStatusTestMetrics(
   payload: LiveStatusTestPayload,
   nowMs = Date.now(),
+  context: AudienceContext = {},
 ): LiveStatusResolvedMetrics {
   const test = normalizeLiveStatusTest(payload);
-  const baseListeners = test.listeners ?? LIVE_TEST_DEFAULT_LISTENERS;
-  const baseVisitors = test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
-  const movement = (test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
-  const liveBoost = test.state === "live" ? (test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST) / 100 : 0;
-  const growth = (test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH) / 100;
-  const startedAt = normalizeDateMs(test.updatedAt);
+  const profile = resolveLiveStatusAudienceProfile(test, nowMs, context);
+  const isLive = Boolean(context.liveDj?.isLive);
+  const liveBoost = isLive ? profile.liveBoostPercent / 100 : 0;
+  const minListeners = Math.max(0, Math.round(profile.listenersMin * (1 + liveBoost)));
+  const maxListeners = Math.max(minListeners, Math.round(profile.listenersMax * (1 + liveBoost)));
+  const movement = profile.movementPercent / 100;
+  const exitPressure = profile.exitPercent / 100;
+  const startedAt = normalizeDateMs(test.appliedAt || test.updatedAt);
   const elapsedMinutes = startedAt ? Math.max(0, (nowMs - startedAt) / 60_000) : 0;
   const seed = (test.seed ?? 731) / 97;
   const seconds = nowMs / 1000;
-  const wave = Math.sin(seconds / 9 + seed) * 0.56 + Math.sin(seconds / 23 + seed * 1.8) * 0.32;
-  const softWave = (wave + 1) / 2;
-  const stateFactor = test.state === "connecting" ? 0.62 : 1;
-  const listenerMovement = 1 + wave * 0.3 * movement;
-  const visitorGrowth = 1 + Math.min(0.72, (elapsedMinutes / 240) * growth);
-  const visitorPulse = 1 + softWave * 0.045 * movement + liveBoost * 0.34;
-  const listeners = test.state === "offline" || test.state === "off"
-    ? 0
-    : normalizeWholeNumber(baseListeners * stateFactor * listenerMovement * (1 + liveBoost), 0, 0, LIVE_TEST_MAX_LISTENERS);
-  const visitors = test.state === "off"
-    ? baseVisitors
-    : normalizeWholeNumber(baseVisitors * visitorGrowth * visitorPulse, baseVisitors, 0, LIVE_TEST_MAX_VISITORS);
+  const wave = Math.sin(seconds / 11 + seed) * 0.52 + Math.sin(seconds / 31 + seed * 1.7) * 0.34 + Math.cos(seconds / 53 + seed * 0.8) * 0.14;
+  const softWave = Math.max(0, Math.min(1, (wave + 1) / 2));
+  const exitBias = wave < 0 ? Math.abs(wave) * 0.18 * exitPressure : 0;
+  const position = Math.max(0, Math.min(1, 0.5 + wave * 0.5 * Math.max(0.08, movement) - exitBias));
+  const targetListeners = minListeners + (maxListeners - minListeners) * position;
+  const transitionProgress = easedProgress(elapsedMinutes, transitionMinutes(profile.transitionPercent));
+  const rampFromListeners = normalizeWholeNumber(test.rampFromListeners, targetListeners, 0, LIVE_TEST_MAX_LISTENERS);
+  const listeners = normalizeWholeNumber(
+    rampFromListeners + (targetListeners - rampFromListeners) * transitionProgress,
+    targetListeners,
+    0,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+
+  const visitorBase = test.visitorBase ?? test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
+  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
+    ? test.visitorTarget
+    : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
+  const visitorGrowthMinutes = Math.max(35, 520 - profile.visitorGrowthPercent * 4.6);
+  const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
+  const rampFromVisitors = normalizeWholeNumber(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
+  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement);
+  const visitors = normalizeWholeNumber(
+    (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
+    visitorBase,
+    0,
+    LIVE_TEST_MAX_VISITORS,
+  );
 
   return { listeners, visitors };
 }
 
+export function resolveLiveStatusAudienceProfile(
+  payload: LiveStatusTestPayload,
+  nowMs = Date.now(),
+  context: AudienceContext = {},
+): ActiveAudienceProfile {
+  const test = normalizeLiveStatusTest(payload);
+  const globalProfile = globalAudienceProfile(test);
+  const djProfile = matchingDjAudienceProfile(test.djProfiles || [], context.liveDj);
+  if (djProfile) return { ...globalProfile, ...profileFromDj(djProfile), source: "dj" };
+
+  const scheduleProfile = matchingScheduleAudienceProfile(test.scheduleProfiles || [], nowMs);
+  if (scheduleProfile) return { ...globalProfile, ...profileFromSchedule(scheduleProfile), source: "schedule" };
+
+  return globalProfile;
+}
+
 export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLiveStatusTest()): NowPlayingResponse {
   const test = normalizeLiveStatusTest(payload);
-  if (test.state === "off") return data;
+  const manualLiveDj = resolveManualLiveDjStatus(test);
+  const liveDj = manualLiveDj || data.liveDj;
+  const track = manualLiveDj ? trackFromLiveDj(data.track, manualLiveDj) : data.track;
+  if (!test.enabled && !manualLiveDj) return { ...data, track, liveDj, liveStatusTest: test };
 
-  const liveDj = {
-    state: test.state,
-    isLive: test.state === "live",
-    djName: test.state === "live" ? test.djName || "DJ Leo" : null,
-    programName: test.state === "live" ? test.programName || "Roots Strike" : null,
-    matchedSignature: "modo-teste",
-    detectedValue: "simulação local",
-    source: "test" as const,
-  };
-  const { listeners, visitors } = resolveLiveStatusTestMetrics(test);
+  const { listeners, visitors } = resolveLiveStatusTestMetrics(test, Date.now(), { liveDj });
 
   return {
     ...data,
-    ok: test.state !== "offline",
+    track,
     stats: {
       ...data.stats,
       listeners,
       peakListeners: Math.max(Number(data.stats.peakListeners || 0), listeners),
       uniqueListeners: Math.max(Number(data.stats.uniqueListeners || 0), listeners),
       streamHits: visitors,
-      isOnline: test.state !== "offline",
+      isOnline: data.stats.isOnline,
     },
     liveDj,
-    track: test.state === "live"
-      ? {
-          ...data.track,
-          title: liveDj.programName || "Programa Ao Vivo",
-          artist: liveDj.djName || "DJ ao vivo",
-          raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
-        }
-      : data.track,
+    liveStatusTest: test,
   };
 }
 
@@ -330,22 +375,388 @@ function normalizeSignatures(value: string) {
 }
 
 export function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>): LiveStatusTestPayload {
-  const state = ["online", "connecting", "offline", "live", "off"].includes(String(payload.state))
-    ? payload.state as LiveStatusTestPayload["state"]
+  const legacyState = ["online", "connecting", "offline", "live", "off"].includes(String(payload.state))
+    ? payload.state as NonNullable<LiveStatusTestPayload["state"]>
     : "off";
+  const enabled = typeof payload.enabled === "boolean" ? payload.enabled : legacyState !== "off";
+  const legacyListeners = normalizeWholeNumber(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS);
+  const listenersMin = normalizeWholeNumber(
+    payload.listenersMin,
+    Math.max(0, Math.round(legacyListeners * 0.82)) || LIVE_TEST_DEFAULT_LISTENERS_MIN,
+    0,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+  const listenersMax = normalizeWholeNumber(
+    payload.listenersMax,
+    Math.max(listenersMin, Math.round(legacyListeners * 1.18), LIVE_TEST_DEFAULT_LISTENERS_MAX),
+    listenersMin,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+  const visitorBase = normalizeWholeNumber(
+    payload.visitorBase ?? payload.visitors,
+    LIVE_TEST_DEFAULT_VISITORS,
+    0,
+    LIVE_TEST_MAX_VISITORS,
+  );
+  const visitorTarget = normalizeNullableWholeNumber(payload.visitorTarget, visitorBase, LIVE_TEST_MAX_VISITORS);
+  const movementPercent = normalizeWholeNumber(payload.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT);
+  const exitPercent = normalizeWholeNumber(payload.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT);
+  const transitionPercent = normalizeWholeNumber(payload.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100);
+  const liveBoostPercent = normalizeWholeNumber(payload.liveBoostPercent, LIVE_TEST_DEFAULT_LIVE_BOOST, 0, LIVE_TEST_MAX_PERCENT);
+  const visitorGrowthPercent = normalizeWholeNumber(
+    payload.visitorGrowthPercent ?? payload.growthPercent,
+    LIVE_TEST_DEFAULT_GROWTH,
+    0,
+    LIVE_TEST_MAX_GROWTH_PERCENT,
+  );
+  const updatedAt = normalizeIsoString(payload.updatedAt) || new Date().toISOString();
 
   return {
-    state,
+    mode: "audience",
+    enabled,
+    state: enabled ? "online" : "off",
     djName: String(payload.djName || "DJ Leo").trim(),
     programName: String(payload.programName || "Roots Strike").trim(),
-    listeners: normalizeWholeNumber(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS),
-    visitors: normalizeWholeNumber(payload.visitors, LIVE_TEST_DEFAULT_VISITORS, 0, LIVE_TEST_MAX_VISITORS),
-    movementPercent: normalizeWholeNumber(payload.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
-    liveBoostPercent: normalizeWholeNumber(payload.liveBoostPercent, LIVE_TEST_DEFAULT_LIVE_BOOST, 0, LIVE_TEST_MAX_PERCENT),
-    growthPercent: normalizeWholeNumber(payload.growthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    listeners: legacyListeners,
+    visitors: visitorBase,
+    listenersMin,
+    listenersMax,
+    visitorBase,
+    visitorTarget,
+    movementPercent,
+    exitPercent,
+    transitionPercent,
+    liveBoostPercent,
+    growthPercent: visitorGrowthPercent,
+    visitorGrowthPercent,
+    rampFromListeners: normalizeWholeNumber(payload.rampFromListeners, legacyListeners, 0, LIVE_TEST_MAX_LISTENERS),
+    rampFromVisitors: normalizeWholeNumber(payload.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS),
     seed: normalizeWholeNumber(payload.seed, 731, 1, 999_999),
-    updatedAt: normalizeIsoString(payload.updatedAt) || new Date().toISOString(),
+    appliedAt: normalizeIsoString(payload.appliedAt) || updatedAt,
+    updatedAt,
+    scheduleProfiles: normalizeAudienceScheduleProfiles(payload.scheduleProfiles),
+    djProfiles: normalizeAudienceDjProfiles(payload.djProfiles),
+    liveDjControl: normalizeLiveDjControl(payload.liveDjControl),
   };
+}
+
+export function emptyAudienceScheduleProfile(): AudienceScheduleProfile {
+  return {
+    id: crypto.randomUUID(),
+    label: "Horário especial",
+    enabled: true,
+    dayIds: ["Sat", "Sun"],
+    startTime: "18:00",
+    endTime: "23:59",
+    listenersMin: 80,
+    listenersMax: 180,
+    movementPercent: 42,
+    exitPercent: 28,
+    transitionPercent: 62,
+    visitorGrowthPercent: 14,
+  };
+}
+
+export function emptyAudienceDjProfile(dj?: StationDj): AudienceDjProfile {
+  return {
+    id: crypto.randomUUID(),
+    enabled: true,
+    djName: dj?.djName || "",
+    programName: dj?.programName || "",
+    signatures: dj?.signatures || "",
+    listenersMin: 90,
+    listenersMax: 220,
+    movementPercent: 48,
+    exitPercent: 24,
+    transitionPercent: 66,
+    liveBoostPercent: 35,
+  };
+}
+
+export function defaultLiveDjControl(): ManualLiveDjControl {
+  return {
+    enabled: true,
+    active: false,
+    djName: "",
+    programName: "",
+    startedAt: null,
+    updatedAt: null,
+    schedules: [],
+  };
+}
+
+export function emptyManualLiveDjSchedule(dj?: StationDj): ManualLiveDjSchedule {
+  return {
+    id: crypto.randomUUID(),
+    stationDjId: dj?.id || null,
+    enabled: true,
+    djName: dj?.djName || "",
+    programName: dj?.programName || "",
+    dayIds: ["Sat", "Sun"],
+    startTime: "18:00",
+    endTime: "23:59",
+  };
+}
+
+export function resolveManualLiveDjStatus(payload: LiveStatusTestPayload, nowMs = Date.now()): LiveDjStatus | null {
+  const control = normalizeLiveStatusTest(payload).liveDjControl || defaultLiveDjControl();
+  if (!control.enabled) return null;
+
+  if (control.active) {
+    return manualLiveDjStatus(control.djName, control.programName, "manual", "controle manual");
+  }
+
+  const activeSchedule = matchingManualLiveDjSchedule(control.schedules, nowMs);
+  if (!activeSchedule) return null;
+
+  return manualLiveDjStatus(
+    activeSchedule.djName,
+    activeSchedule.programName,
+    "agenda-manual",
+    `${activeSchedule.startTime}-${activeSchedule.endTime}`,
+  );
+}
+
+function normalizeAudienceScheduleProfiles(value: unknown): AudienceScheduleProfile[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 28).map((profile) => {
+    const item = profile as Partial<AudienceScheduleProfile>;
+    const listenersMin = normalizeWholeNumber(item.listenersMin, 40, 0, LIVE_TEST_MAX_LISTENERS);
+    return {
+      id: String(item.id || crypto.randomUUID()),
+      label: String(item.label || "Horário especial").trim(),
+      enabled: item.enabled !== false,
+      dayIds: normalizeDayIds(item.dayIds),
+      startTime: normalizeTime(item.startTime, "18:00"),
+      endTime: normalizeTime(item.endTime, "23:59"),
+      listenersMin,
+      listenersMax: normalizeWholeNumber(item.listenersMax, Math.max(listenersMin, 120), listenersMin, LIVE_TEST_MAX_LISTENERS),
+      movementPercent: normalizeWholeNumber(item.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+      exitPercent: normalizeWholeNumber(item.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
+      transitionPercent: normalizeWholeNumber(item.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
+      visitorGrowthPercent: normalizeWholeNumber(item.visitorGrowthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    };
+  });
+}
+
+function normalizeAudienceDjProfiles(value: unknown): AudienceDjProfile[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 100).map((profile) => {
+    const item = profile as Partial<AudienceDjProfile>;
+    const listenersMin = normalizeWholeNumber(item.listenersMin, 60, 0, LIVE_TEST_MAX_LISTENERS);
+    return {
+      id: String(item.id || crypto.randomUUID()),
+      enabled: item.enabled !== false,
+      djName: String(item.djName || "").trim(),
+      programName: String(item.programName || "").trim(),
+      signatures: normalizeSignatures(item.signatures || ""),
+      listenersMin,
+      listenersMax: normalizeWholeNumber(item.listenersMax, Math.max(listenersMin, 160), listenersMin, LIVE_TEST_MAX_LISTENERS),
+      movementPercent: normalizeWholeNumber(item.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+      exitPercent: normalizeWholeNumber(item.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
+      transitionPercent: normalizeWholeNumber(item.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
+      liveBoostPercent: normalizeWholeNumber(item.liveBoostPercent, 35, 0, LIVE_TEST_MAX_PERCENT),
+    };
+  });
+}
+
+function normalizeLiveDjControl(value: unknown): ManualLiveDjControl {
+  const item = value && typeof value === "object" ? value as Partial<ManualLiveDjControl> : {};
+  return {
+    enabled: item.enabled !== false,
+    active: item.active === true,
+    djName: String(item.djName || "").trim(),
+    programName: String(item.programName || "").trim(),
+    startedAt: normalizeIsoString(item.startedAt) || null,
+    updatedAt: normalizeIsoString(item.updatedAt) || null,
+    schedules: normalizeManualLiveDjSchedules(item.schedules),
+  };
+}
+
+function normalizeManualLiveDjSchedules(value: unknown): ManualLiveDjSchedule[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 56).map((schedule) => {
+    const item = schedule as Partial<ManualLiveDjSchedule>;
+    return {
+      id: String(item.id || crypto.randomUUID()),
+      stationDjId: item.stationDjId ? String(item.stationDjId).trim() : null,
+      enabled: item.enabled !== false,
+      djName: String(item.djName || "").trim(),
+      programName: String(item.programName || "").trim(),
+      dayIds: normalizeDayIds(item.dayIds),
+      startTime: normalizeTime(item.startTime, "18:00"),
+      endTime: normalizeTime(item.endTime, "23:59"),
+    };
+  });
+}
+
+function matchingManualLiveDjSchedule(schedules: ManualLiveDjSchedule[], nowMs: number) {
+  const parts = saoPauloTimeParts(nowMs);
+  return schedules.find((schedule) => {
+    if (!schedule.enabled || !schedule.dayIds.includes(parts.dayId)) return false;
+    if (!schedule.djName.trim() && !schedule.programName.trim()) return false;
+    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(schedule.startTime), timeToMinutes(schedule.endTime));
+  }) || null;
+}
+
+function manualLiveDjStatus(djName: string, programName: string, matchedSignature: string, detectedValue: string): LiveDjStatus {
+  const cleanDjName = djName.trim() || "DJ ao vivo";
+  const cleanProgramName = programName.trim() || "Programa Ao Vivo";
+  return {
+    state: "live",
+    isLive: true,
+    djName: cleanDjName,
+    programName: cleanProgramName,
+    matchedSignature,
+    detectedValue,
+    source: "test",
+  };
+}
+
+function trackFromLiveDj(track: NowPlayingResponse["track"], liveDj: LiveDjStatus): NowPlayingResponse["track"] {
+  return {
+    ...track,
+    artist: liveDj.djName || "DJ ao vivo",
+    title: liveDj.programName || "Programa Ao Vivo",
+    raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
+  };
+}
+
+function globalAudienceProfile(test: LiveStatusTestPayload): ActiveAudienceProfile {
+  return {
+    source: "global",
+    label: "Base global",
+    listenersMin: test.listenersMin ?? LIVE_TEST_DEFAULT_LISTENERS_MIN,
+    listenersMax: test.listenersMax ?? LIVE_TEST_DEFAULT_LISTENERS_MAX,
+    movementPercent: test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT,
+    exitPercent: test.exitPercent ?? LIVE_TEST_DEFAULT_EXIT,
+    transitionPercent: test.transitionPercent ?? LIVE_TEST_DEFAULT_TRANSITION,
+    liveBoostPercent: test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST,
+    visitorGrowthPercent: test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH,
+  };
+}
+
+function profileFromSchedule(profile: AudienceScheduleProfile): Partial<ActiveAudienceProfile> {
+  return {
+    label: profile.label,
+    listenersMin: profile.listenersMin,
+    listenersMax: profile.listenersMax,
+    movementPercent: profile.movementPercent,
+    exitPercent: profile.exitPercent,
+    transitionPercent: profile.transitionPercent,
+    visitorGrowthPercent: profile.visitorGrowthPercent,
+  };
+}
+
+function profileFromDj(profile: AudienceDjProfile): Partial<ActiveAudienceProfile> {
+  return {
+    label: profile.djName || profile.programName || "DJ ao vivo",
+    listenersMin: profile.listenersMin,
+    listenersMax: profile.listenersMax,
+    movementPercent: profile.movementPercent,
+    exitPercent: profile.exitPercent,
+    transitionPercent: profile.transitionPercent,
+    liveBoostPercent: profile.liveBoostPercent,
+  };
+}
+
+function matchingDjAudienceProfile(profiles: AudienceDjProfile[], liveDj?: LiveDjStatus | null) {
+  if (!liveDj?.isLive) return null;
+  const candidates = [liveDj.djName, liveDj.programName, liveDj.matchedSignature, liveDj.detectedValue].filter(Boolean);
+  if (!candidates.length) return null;
+
+  return profiles.find((profile) => {
+    if (!profile.enabled) return false;
+    const signatures = normalizeSignatures([
+      profile.signatures,
+      profile.djName,
+      profile.programName,
+    ].filter(Boolean).join("\n")).split("\n");
+
+    return signatures.some((signature) => {
+      const cleanSignature = comparableAudienceText(signature);
+      if (cleanSignature.length < 3) return false;
+      return candidates.some((candidate) => {
+        const cleanCandidate = comparableAudienceText(candidate);
+        return cleanCandidate === cleanSignature ||
+          cleanCandidate.includes(cleanSignature) ||
+          cleanSignature.includes(cleanCandidate);
+      });
+    });
+  }) || null;
+}
+
+function matchingScheduleAudienceProfile(profiles: AudienceScheduleProfile[], nowMs: number) {
+  const parts = saoPauloTimeParts(nowMs);
+  return profiles.find((profile) => {
+    if (!profile.enabled || !profile.dayIds.includes(parts.dayId)) return false;
+    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(profile.startTime), timeToMinutes(profile.endTime));
+  }) || null;
+}
+
+function easedProgress(elapsedMinutes: number, durationMinutes: number) {
+  if (durationMinutes <= 0) return 1;
+  const progress = Math.max(0, Math.min(1, elapsedMinutes / durationMinutes));
+  return 1 - Math.pow(1 - progress, 3);
+}
+
+function transitionMinutes(percent: number) {
+  const speed = Math.max(0, Math.min(100, percent)) / 100;
+  return 95 - speed * 86;
+}
+
+function normalizeNullableWholeNumber(value: unknown, min: number, max: number) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function normalizeDayIds(value: unknown) {
+  if (!Array.isArray(value)) return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const dayIds = value.map(String).filter((dayId) => (AUDIENCE_DAY_IDS as readonly string[]).includes(dayId));
+  return dayIds.length ? dayIds : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+}
+
+function normalizeTime(value: unknown, fallback: string) {
+  const clean = String(value || "").trim();
+  return /^\d{2}:\d{2}$/.test(clean) ? clean : fallback;
+}
+
+function comparableAudienceText(value: unknown) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+function saoPauloTimeParts(nowMs: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(nowMs));
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || "";
+  return {
+    dayId: value("weekday"),
+    minuteOfDay: Number(value("hour")) * 60 + Number(value("minute")),
+  };
+}
+
+function timeToMinutes(value: string) {
+  const [hour = "0", minute = "0"] = value.split(":");
+  return Number(hour) * 60 + Number(minute);
+}
+
+function isMinuteWithinWindow(current: number, start: number, end: number) {
+  if (start <= end) return current >= start && current <= end;
+  return current >= start || current <= end;
 }
 
 function normalizeWholeNumber(value: unknown, fallback: number, min: number, max: number) {

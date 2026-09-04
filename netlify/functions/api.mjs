@@ -148,9 +148,9 @@ const publicProgramsCacheHeaders = publicCacheHeaders({
   staleWhileRevalidate: 7200,
 });
 const nowPlayingCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 30,
-  cdnMaxAge: 45,
-  staleWhileRevalidate: 180,
+  browserMaxAge: 90,
+  cdnMaxAge: 180,
+  staleWhileRevalidate: 900,
 });
 const cameraCacheHeaders = publicCacheHeaders({
   browserMaxAge: 1800,
@@ -503,10 +503,18 @@ function liveDjCandidates(stats, rawValue) {
     stats.streamsource,
     stats.source,
     stats.dj,
+    stats.DJ,
+    stats.Dj,
     stats.dj_login,
     stats.djLogin,
+    stats.djName,
+    stats.djname,
     stats.currentdj,
     stats.currentDj,
+    stats.currentDJ,
+    stats.current_dj,
+    stats.sourceUserId,
+    stats.source_user_id,
     stats.encoder,
     stats.username,
     stats.user,
@@ -1200,7 +1208,7 @@ async function handleDjs(event, pathname) {
 
 async function handleLiveStatusTest(event, pathname) {
   const method = event.httpMethod || "GET";
-  if (pathname !== "/live-status-test") return json(404, { ok: false, message: "Endpoint de visitas não encontrado." });
+  if (pathname !== "/live-status-test") return json(404, { ok: false, message: "Endpoint de audiência não encontrado." });
 
   if (method === "GET") {
     try {
@@ -1217,7 +1225,7 @@ async function handleLiveStatusTest(event, pathname) {
         source: "fallback",
         liveStatusTest: { state: "off" },
         fetchedAt: new Date().toISOString(),
-        message: error instanceof Error && error.message ? error.message : "Simulação indisponível.",
+        message: error instanceof Error && error.message ? error.message : "Audiência indisponível.",
       }, nowPlayingCacheHeaders);
     }
   }
@@ -1235,7 +1243,7 @@ async function handleLiveStatusTest(event, pathname) {
         fetchedAt: new Date().toISOString(),
       });
     } catch (error) {
-      return serverError(error, "Não foi possível salvar a simulação.");
+      return serverError(error, "Não foi possível salvar a audiência.");
     }
   }
 

@@ -10,7 +10,11 @@ const PROGRAM_LOGO_MAX_SIZE = 2_500_000;
 const PROGRAM_LOGO_MAX_DIMENSION = 1800;
 const LIVE_TEST_DEFAULT_LISTENERS = 2;
 const LIVE_TEST_DEFAULT_VISITORS = 49_823;
+const LIVE_TEST_DEFAULT_LISTENERS_MIN = 2;
+const LIVE_TEST_DEFAULT_LISTENERS_MAX = 12;
 const LIVE_TEST_DEFAULT_MOVEMENT = 32;
+const LIVE_TEST_DEFAULT_EXIT = 36;
+const LIVE_TEST_DEFAULT_TRANSITION = 58;
 const LIVE_TEST_DEFAULT_LIVE_BOOST = 65;
 const LIVE_TEST_DEFAULT_GROWTH = 12;
 const LIVE_TEST_MAX_LISTENERS = 999_999;
@@ -18,6 +22,7 @@ const LIVE_TEST_MAX_VISITORS = 9_999_999;
 const LIVE_TEST_MAX_PERCENT = 200;
 const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
 const LIVE_TEST_STATES = new Set(["online", "connecting", "offline", "live", "off"]);
+const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ADS_BLOB_STORE = "cnjm-ad-images";
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
@@ -263,18 +268,61 @@ export function normalizeDjPayload(dj = {}) {
 }
 
 export function normalizeLiveStatusPayload(payload = {}) {
-  const state = LIVE_TEST_STATES.has(String(payload.state)) ? String(payload.state) : "off";
+  const legacyState = LIVE_TEST_STATES.has(String(payload.state)) ? String(payload.state) : "off";
+  const enabled = typeof payload.enabled === "boolean" ? payload.enabled : legacyState !== "off";
+  const legacyListeners = normalizeRunCount(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS);
+  const listenersMin = normalizeRunCount(
+    payload.listenersMin,
+    Math.max(0, Math.round(legacyListeners * 0.82)) || LIVE_TEST_DEFAULT_LISTENERS_MIN,
+    0,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+  const listenersMax = normalizeRunCount(
+    payload.listenersMax,
+    Math.max(listenersMin, Math.round(legacyListeners * 1.18), LIVE_TEST_DEFAULT_LISTENERS_MAX),
+    listenersMin,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+  const visitorBase = normalizeRunCount(
+    payload.visitorBase ?? payload.visitors,
+    LIVE_TEST_DEFAULT_VISITORS,
+    0,
+    LIVE_TEST_MAX_VISITORS,
+  );
+  const visitorGrowthPercent = normalizeRunCount(
+    payload.visitorGrowthPercent ?? payload.growthPercent,
+    LIVE_TEST_DEFAULT_GROWTH,
+    0,
+    LIVE_TEST_MAX_GROWTH_PERCENT,
+  );
+  const updatedAt = normalizeIso(payload.updatedAt) || new Date();
+
   return {
-    state,
+    mode: "audience",
+    enabled,
+    state: enabled ? "online" : "off",
     djName: String(payload.djName || "DJ Leo").trim(),
     programName: String(payload.programName || "Roots Strike").trim(),
-    listeners: normalizeRunCount(payload.listeners, LIVE_TEST_DEFAULT_LISTENERS, 0, LIVE_TEST_MAX_LISTENERS),
-    visitors: normalizeRunCount(payload.visitors, LIVE_TEST_DEFAULT_VISITORS, 0, LIVE_TEST_MAX_VISITORS),
+    listeners: legacyListeners,
+    visitors: visitorBase,
+    listenersMin,
+    listenersMax,
+    visitorBase,
+    visitorTarget: normalizeNullableRunCount(payload.visitorTarget, visitorBase, LIVE_TEST_MAX_VISITORS),
     movementPercent: normalizeRunCount(payload.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+    exitPercent: normalizeRunCount(payload.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
+    transitionPercent: normalizeRunCount(payload.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
     liveBoostPercent: normalizeRunCount(payload.liveBoostPercent, LIVE_TEST_DEFAULT_LIVE_BOOST, 0, LIVE_TEST_MAX_PERCENT),
-    growthPercent: normalizeRunCount(payload.growthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    growthPercent: visitorGrowthPercent,
+    visitorGrowthPercent,
+    rampFromListeners: normalizeRunCount(payload.rampFromListeners, legacyListeners, 0, LIVE_TEST_MAX_LISTENERS),
+    rampFromVisitors: normalizeRunCount(payload.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS),
     seed: normalizeRunCount(payload.seed, 731, 1, 999_999),
-    updatedAt: normalizeIso(payload.updatedAt) || new Date(),
+    appliedAt: normalizeIso(payload.appliedAt) || updatedAt,
+    updatedAt,
+    scheduleProfiles: normalizeAudienceScheduleProfiles(payload.scheduleProfiles),
+    djProfiles: normalizeAudienceDjProfiles(payload.djProfiles),
+    liveDjControl: normalizeLiveDjControl(payload.liveDjControl),
   };
 }
 
@@ -349,87 +397,166 @@ function serializeDj(row) {
 }
 
 function serializeLiveStatus(row) {
+  const config = parseStoredAudienceConfig(row?.config);
   const normalized = normalizeLiveStatusPayload({
+    enabled: row?.enabled,
+    mode: row?.mode,
     state: row?.state,
     djName: row?.djName,
     programName: row?.programName,
     listeners: row?.listeners,
     visitors: row?.visitors,
+    listenersMin: row?.listenersMin,
+    listenersMax: row?.listenersMax,
+    visitorBase: row?.visitorBase,
+    visitorTarget: row?.visitorTarget,
     movementPercent: row?.movementPercent,
+    exitPercent: row?.exitPercent,
+    transitionPercent: row?.transitionPercent,
     liveBoostPercent: row?.liveBoostPercent,
     growthPercent: row?.growthPercent,
+    visitorGrowthPercent: row?.visitorGrowthPercent,
+    rampFromListeners: row?.rampFromListeners,
+    rampFromVisitors: row?.rampFromVisitors,
     seed: row?.seed,
+    appliedAt: row?.appliedAt,
     updatedAt: row?.updatedAt,
+    scheduleProfiles: row?.scheduleProfiles,
+    djProfiles: row?.djProfiles,
+    liveDjControl: row?.liveDjControl,
+    ...config,
   });
 
   return {
     ...normalized,
+    appliedAt: iso(normalized.appliedAt) || new Date().toISOString(),
     updatedAt: iso(normalized.updatedAt) || new Date().toISOString(),
   };
 }
 
-export function resolveLiveStatusMetrics(payload, nowMs = Date.now()) {
+function parseStoredAudienceConfig(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function resolveLiveStatusMetrics(payload, nowMs = Date.now(), liveDj = null) {
   const test = serializeLiveStatus(payload);
-  const baseListeners = test.listeners ?? LIVE_TEST_DEFAULT_LISTENERS;
-  const baseVisitors = test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
-  const movement = (test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
-  const liveBoost = test.state === "live" ? (test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST) / 100 : 0;
-  const growth = (test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH) / 100;
-  const startedAt = new Date(test.updatedAt).getTime();
+  const profile = resolveLiveStatusAudienceProfile(test, nowMs, liveDj);
+  const liveBoost = liveDj?.isLive ? profile.liveBoostPercent / 100 : 0;
+  const minListeners = Math.max(0, Math.round(profile.listenersMin * (1 + liveBoost)));
+  const maxListeners = Math.max(minListeners, Math.round(profile.listenersMax * (1 + liveBoost)));
+  const movement = profile.movementPercent / 100;
+  const exitPressure = profile.exitPercent / 100;
+  const startedAt = new Date(test.appliedAt || test.updatedAt).getTime();
   const elapsedMinutes = Number.isNaN(startedAt) ? 0 : Math.max(0, (nowMs - startedAt) / 60_000);
   const seed = (test.seed ?? 731) / 97;
   const seconds = nowMs / 1000;
-  const wave = Math.sin(seconds / 9 + seed) * 0.56 + Math.sin(seconds / 23 + seed * 1.8) * 0.32;
-  const softWave = (wave + 1) / 2;
-  const stateFactor = test.state === "connecting" ? 0.62 : 1;
-  const listenerMovement = 1 + wave * 0.3 * movement;
-  const visitorGrowth = 1 + Math.min(0.72, (elapsedMinutes / 240) * growth);
-  const visitorPulse = 1 + softWave * 0.045 * movement + liveBoost * 0.34;
-  const listeners = test.state === "offline" || test.state === "off"
-    ? 0
-    : normalizeRunCount(baseListeners * stateFactor * listenerMovement * (1 + liveBoost), 0, 0, LIVE_TEST_MAX_LISTENERS);
-  const visitors = test.state === "off"
-    ? baseVisitors
-    : normalizeRunCount(baseVisitors * visitorGrowth * visitorPulse, baseVisitors, 0, LIVE_TEST_MAX_VISITORS);
+  const wave = Math.sin(seconds / 11 + seed) * 0.52 + Math.sin(seconds / 31 + seed * 1.7) * 0.34 + Math.cos(seconds / 53 + seed * 0.8) * 0.14;
+  const softWave = Math.max(0, Math.min(1, (wave + 1) / 2));
+  const exitBias = wave < 0 ? Math.abs(wave) * 0.18 * exitPressure : 0;
+  const position = Math.max(0, Math.min(1, 0.5 + wave * 0.5 * Math.max(0.08, movement) - exitBias));
+  const targetListeners = minListeners + (maxListeners - minListeners) * position;
+  const transitionProgress = easedProgress(elapsedMinutes, transitionMinutes(profile.transitionPercent));
+  const rampFromListeners = normalizeRunCount(test.rampFromListeners, targetListeners, 0, LIVE_TEST_MAX_LISTENERS);
+  const listeners = normalizeRunCount(
+    rampFromListeners + (targetListeners - rampFromListeners) * transitionProgress,
+    targetListeners,
+    0,
+    LIVE_TEST_MAX_LISTENERS,
+  );
+
+  const visitorBase = test.visitorBase ?? test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
+  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
+    ? test.visitorTarget
+    : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
+  const visitorGrowthMinutes = Math.max(35, 520 - profile.visitorGrowthPercent * 4.6);
+  const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
+  const rampFromVisitors = normalizeRunCount(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
+  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement);
+  const visitors = normalizeRunCount(
+    (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
+    visitorBase,
+    0,
+    LIVE_TEST_MAX_VISITORS,
+  );
 
   return { listeners, visitors };
 }
 
+export function resolveLiveStatusAudienceProfile(payload, nowMs = Date.now(), liveDj = null) {
+  const test = serializeLiveStatus(payload);
+  const globalProfile = {
+    source: "global",
+    label: "Base global",
+    listenersMin: test.listenersMin ?? LIVE_TEST_DEFAULT_LISTENERS_MIN,
+    listenersMax: test.listenersMax ?? LIVE_TEST_DEFAULT_LISTENERS_MAX,
+    movementPercent: test.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT,
+    exitPercent: test.exitPercent ?? LIVE_TEST_DEFAULT_EXIT,
+    transitionPercent: test.transitionPercent ?? LIVE_TEST_DEFAULT_TRANSITION,
+    liveBoostPercent: test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST,
+    visitorGrowthPercent: test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH,
+  };
+  const djProfile = matchingDjAudienceProfile(test.djProfiles || [], liveDj);
+  if (djProfile) {
+    return {
+      ...globalProfile,
+      source: "dj",
+      label: djProfile.djName || djProfile.programName || "DJ ao vivo",
+      listenersMin: djProfile.listenersMin,
+      listenersMax: djProfile.listenersMax,
+      movementPercent: djProfile.movementPercent,
+      exitPercent: djProfile.exitPercent,
+      transitionPercent: djProfile.transitionPercent,
+      liveBoostPercent: djProfile.liveBoostPercent,
+    };
+  }
+
+  const scheduleProfile = matchingScheduleAudienceProfile(test.scheduleProfiles || [], nowMs);
+  if (scheduleProfile) {
+    return {
+      ...globalProfile,
+      source: "schedule",
+      label: scheduleProfile.label,
+      listenersMin: scheduleProfile.listenersMin,
+      listenersMax: scheduleProfile.listenersMax,
+      movementPercent: scheduleProfile.movementPercent,
+      exitPercent: scheduleProfile.exitPercent,
+      transitionPercent: scheduleProfile.transitionPercent,
+      visitorGrowthPercent: scheduleProfile.visitorGrowthPercent,
+    };
+  }
+
+  return globalProfile;
+}
+
 export function applyLiveStatusSimulation(data, payload) {
   const test = serializeLiveStatus(payload);
-  if (test.state === "off") return { ...data, liveStatusTest: test };
+  const manualLiveDj = resolveManualLiveDjStatus(test);
+  const liveDj = manualLiveDj || data.liveDj;
+  const track = manualLiveDj ? trackFromLiveDj(data.track, manualLiveDj) : data.track;
+  if (!test.enabled && !manualLiveDj) return { ...data, track, liveDj, liveStatusTest: test };
 
-  const { listeners, visitors } = resolveLiveStatusMetrics(test);
-  const liveDj = {
-    state: test.state,
-    isLive: test.state === "live",
-    djName: test.state === "live" ? test.djName || "DJ Leo" : null,
-    programName: test.state === "live" ? test.programName || "Roots Strike" : null,
-    matchedSignature: "modo-global",
-    detectedValue: "simulação global",
-    source: "test",
-  };
+  const { listeners, visitors } = resolveLiveStatusMetrics(test, Date.now(), liveDj);
 
   return {
     ...data,
-    ok: test.state !== "offline",
+    track,
     stats: {
       ...data.stats,
       listeners,
       peakListeners: Math.max(Number(data.stats?.peakListeners || 0), listeners),
       uniqueListeners: Math.max(Number(data.stats?.uniqueListeners || 0), listeners),
       streamHits: visitors,
-      isOnline: test.state !== "offline",
+      isOnline: data.stats?.isOnline,
     },
     liveDj,
-    track: test.state === "live"
-      ? {
-          ...data.track,
-          title: liveDj.programName || "Programa Ao Vivo",
-          artist: liveDj.djName || "DJ ao vivo",
-          raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
-        }
-      : data.track,
     liveStatusTest: test,
   };
 }
@@ -925,9 +1052,12 @@ async function ensureLiveStatusTable() {
       live_boost_percent INTEGER NOT NULL DEFAULT 65,
       growth_percent INTEGER NOT NULL DEFAULT 12,
       seed INTEGER NOT NULL DEFAULT 731,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      config JSONB
     )
   `;
+
+  await db()`ALTER TABLE live_status_simulation ADD COLUMN IF NOT EXISTS config JSONB`;
 
   await db()`
     INSERT INTO live_status_simulation (id)
@@ -952,7 +1082,8 @@ export async function getLiveStatusTest() {
       live_boost_percent AS "liveBoostPercent",
       growth_percent AS "growthPercent",
       seed,
-      updated_at AS "updatedAt"
+      updated_at AS "updatedAt",
+      config
     FROM live_status_simulation
     WHERE id = 'global'
     LIMIT 1
@@ -965,6 +1096,12 @@ export async function saveLiveStatusTest(payload) {
   await ensureLiveStatusTable();
 
   const normalized = normalizeLiveStatusPayload(payload);
+  const legacyListeners = Math.round(((normalized.listenersMin ?? normalized.listeners) + (normalized.listenersMax ?? normalized.listeners)) / 2);
+  const normalizedConfig = JSON.stringify({
+    ...normalized,
+    appliedAt: iso(normalized.appliedAt) || new Date().toISOString(),
+    updatedAt: iso(normalized.updatedAt) || new Date().toISOString(),
+  });
   const [row] = await db()`
     INSERT INTO live_status_simulation (
       id,
@@ -977,20 +1114,22 @@ export async function saveLiveStatusTest(payload) {
       live_boost_percent,
       growth_percent,
       seed,
-      updated_at
+      updated_at,
+      config
     )
     VALUES (
       'global',
       ${normalized.state},
       ${normalized.djName},
       ${normalized.programName},
-      ${normalized.listeners},
-      ${normalized.visitors},
+      ${legacyListeners},
+      ${normalized.visitorBase},
       ${normalized.movementPercent},
       ${normalized.liveBoostPercent},
-      ${normalized.growthPercent},
+      ${normalized.visitorGrowthPercent},
       ${normalized.seed},
-      ${normalized.updatedAt}
+      ${normalized.updatedAt},
+      ${normalizedConfig}::jsonb
     )
     ON CONFLICT (id) DO UPDATE SET
       state = EXCLUDED.state,
@@ -1002,7 +1141,8 @@ export async function saveLiveStatusTest(payload) {
       live_boost_percent = EXCLUDED.live_boost_percent,
       growth_percent = EXCLUDED.growth_percent,
       seed = EXCLUDED.seed,
-      updated_at = EXCLUDED.updated_at
+      updated_at = EXCLUDED.updated_at,
+      config = EXCLUDED.config
     RETURNING
       state,
       dj_name AS "djName",
@@ -1013,7 +1153,8 @@ export async function saveLiveStatusTest(payload) {
       live_boost_percent AS "liveBoostPercent",
       growth_percent AS "growthPercent",
       seed,
-      updated_at AS "updatedAt"
+      updated_at AS "updatedAt",
+      config
   `;
 
   return serializeLiveStatus(row);
@@ -1074,7 +1215,6 @@ export async function saveDj(payload) {
   const normalized = normalizeDjPayload(payload);
   if (!normalized.djName) throw new Error("Informe o nome público do DJ.");
   if (!normalized.programName) throw new Error("Informe o nome do programa ao vivo.");
-  if (!normalized.signatures) throw new Error("Cadastre pelo menos uma assinatura de login.");
 
   const [dj] = await db()`
     INSERT INTO station_djs (
@@ -1435,9 +1575,233 @@ function sortPrograms(left, right) {
   return timeToMinutes(left.startTime) - timeToMinutes(right.startTime);
 }
 
+function matchingDjAudienceProfile(profiles, liveDj) {
+  if (!liveDj?.isLive) return null;
+  const candidates = [liveDj.djName, liveDj.programName, liveDj.matchedSignature, liveDj.detectedValue].filter(Boolean);
+  if (!candidates.length) return null;
+
+  return profiles.find((profile) => {
+    if (!profile.enabled) return false;
+    const signatures = normalizeDjSignatures([
+      profile.signatures,
+      profile.djName,
+      profile.programName,
+    ].filter(Boolean).join("\n"));
+
+    return signatures.some((signature) => {
+      const cleanSignature = comparableAudienceText(signature);
+      if (cleanSignature.length < 3) return false;
+      return candidates.some((candidate) => {
+        const cleanCandidate = comparableAudienceText(candidate);
+        return cleanCandidate === cleanSignature ||
+          cleanCandidate.includes(cleanSignature) ||
+          cleanSignature.includes(cleanCandidate);
+      });
+    });
+  }) || null;
+}
+
+function matchingScheduleAudienceProfile(profiles, nowMs) {
+  const parts = saoPauloTimeParts(nowMs);
+  return profiles.find((profile) => {
+    if (!profile.enabled || !profile.dayIds.includes(parts.dayId)) return false;
+    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(profile.startTime), timeToMinutes(profile.endTime));
+  }) || null;
+}
+
+function easedProgress(elapsedMinutes, durationMinutes) {
+  if (durationMinutes <= 0) return 1;
+  const progress = Math.max(0, Math.min(1, elapsedMinutes / durationMinutes));
+  return 1 - Math.pow(1 - progress, 3);
+}
+
+function transitionMinutes(percent) {
+  const speed = Math.max(0, Math.min(100, percent)) / 100;
+  return 95 - speed * 86;
+}
+
+function comparableAudienceText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
+}
+
+function saoPauloTimeParts(nowMs) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(nowMs));
+  const value = (type) => parts.find((part) => part.type === type)?.value || "";
+  return {
+    dayId: value("weekday"),
+    minuteOfDay: Number(value("hour")) * 60 + Number(value("minute")),
+  };
+}
+
+function isMinuteWithinWindow(current, start, end) {
+  if (start <= end) return current >= start && current <= end;
+  return current >= start || current <= end;
+}
+
 function normalizeRunCount(value, fallback, min, max) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+}
+
+function normalizeNullableRunCount(value, min, max) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : null;
+}
+
+function normalizeAudienceScheduleProfiles(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 28).map((profile) => {
+    const listenersMin = normalizeRunCount(profile?.listenersMin, 40, 0, LIVE_TEST_MAX_LISTENERS);
+    return {
+      id: String(profile?.id || randomUUID()),
+      label: String(profile?.label || "Horário especial").trim(),
+      enabled: profile?.enabled !== false,
+      dayIds: normalizeAudienceDayIds(profile?.dayIds),
+      startTime: normalizeTime(profile?.startTime, "18:00"),
+      endTime: normalizeTime(profile?.endTime, "23:59"),
+      listenersMin,
+      listenersMax: normalizeRunCount(profile?.listenersMax, Math.max(listenersMin, 120), listenersMin, LIVE_TEST_MAX_LISTENERS),
+      movementPercent: normalizeRunCount(profile?.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+      exitPercent: normalizeRunCount(profile?.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
+      transitionPercent: normalizeRunCount(profile?.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
+      visitorGrowthPercent: normalizeRunCount(profile?.visitorGrowthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
+    };
+  });
+}
+
+function normalizeAudienceDjProfiles(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 100).map((profile) => {
+    const listenersMin = normalizeRunCount(profile?.listenersMin, 60, 0, LIVE_TEST_MAX_LISTENERS);
+    return {
+      id: String(profile?.id || randomUUID()),
+      enabled: profile?.enabled !== false,
+      djName: String(profile?.djName || "").trim(),
+      programName: String(profile?.programName || "").trim(),
+      signatures: normalizeDjSignatures(profile?.signatures || "").join("\n"),
+      listenersMin,
+      listenersMax: normalizeRunCount(profile?.listenersMax, Math.max(listenersMin, 160), listenersMin, LIVE_TEST_MAX_LISTENERS),
+      movementPercent: normalizeRunCount(profile?.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
+      exitPercent: normalizeRunCount(profile?.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
+      transitionPercent: normalizeRunCount(profile?.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
+      liveBoostPercent: normalizeRunCount(profile?.liveBoostPercent, 35, 0, LIVE_TEST_MAX_PERCENT),
+    };
+  });
+}
+
+export function resolveManualLiveDjStatus(payload, nowMs = Date.now()) {
+  const control = serializeLiveStatus(payload).liveDjControl || defaultLiveDjControl();
+  if (!control.enabled) return null;
+
+  if (control.active) {
+    return manualLiveDjStatus(control.djName, control.programName, "manual", "controle manual");
+  }
+
+  const activeSchedule = matchingManualLiveDjSchedule(control.schedules, nowMs);
+  if (!activeSchedule) return null;
+
+  return manualLiveDjStatus(
+    activeSchedule.djName,
+    activeSchedule.programName,
+    "agenda-manual",
+    `${activeSchedule.startTime}-${activeSchedule.endTime}`,
+  );
+}
+
+function defaultLiveDjControl() {
+  return {
+    enabled: true,
+    active: false,
+    djName: "",
+    programName: "",
+    startedAt: null,
+    updatedAt: null,
+    schedules: [],
+  };
+}
+
+function normalizeLiveDjControl(value) {
+  const item = value && typeof value === "object" ? value : {};
+  return {
+    enabled: item.enabled !== false,
+    active: item.active === true,
+    djName: String(item.djName || "").trim(),
+    programName: String(item.programName || "").trim(),
+    startedAt: iso(item.startedAt) || null,
+    updatedAt: iso(item.updatedAt) || null,
+    schedules: normalizeManualLiveDjSchedules(item.schedules),
+  };
+}
+
+function normalizeManualLiveDjSchedules(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value.slice(0, 56).map((schedule) => ({
+    id: String(schedule?.id || randomUUID()),
+    stationDjId: schedule?.stationDjId ? String(schedule.stationDjId).trim() : null,
+    enabled: schedule?.enabled !== false,
+    djName: String(schedule?.djName || "").trim(),
+    programName: String(schedule?.programName || "").trim(),
+    dayIds: normalizeAudienceDayIds(schedule?.dayIds),
+    startTime: normalizeTime(schedule?.startTime, "18:00"),
+    endTime: normalizeTime(schedule?.endTime, "23:59"),
+  }));
+}
+
+function matchingManualLiveDjSchedule(schedules, nowMs) {
+  const parts = saoPauloTimeParts(nowMs);
+  return schedules.find((schedule) => {
+    if (!schedule.enabled || !schedule.dayIds.includes(parts.dayId)) return false;
+    if (!schedule.djName.trim() && !schedule.programName.trim()) return false;
+    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(schedule.startTime), timeToMinutes(schedule.endTime));
+  }) || null;
+}
+
+function manualLiveDjStatus(djName, programName, matchedSignature, detectedValue) {
+  const cleanDjName = String(djName || "").trim() || "DJ ao vivo";
+  const cleanProgramName = String(programName || "").trim() || "Programa Ao Vivo";
+  return {
+    state: "live",
+    isLive: true,
+    djName: cleanDjName,
+    programName: cleanProgramName,
+    matchedSignature,
+    detectedValue,
+    source: "test",
+  };
+}
+
+function trackFromLiveDj(track, liveDj) {
+  return {
+    ...track,
+    artist: liveDj.djName || "DJ ao vivo",
+    title: liveDj.programName || "Programa Ao Vivo",
+    raw: `${liveDj.djName || "DJ ao vivo"} - ${liveDj.programName || "Programa Ao Vivo"}`,
+  };
+}
+
+function normalizeAudienceDayIds(value) {
+  if (!Array.isArray(value)) return [...AUDIENCE_DAY_IDS];
+  const dayIds = value.map(String).filter((dayId) => AUDIENCE_DAY_IDS.includes(dayId));
+  return dayIds.length ? dayIds : [...AUDIENCE_DAY_IDS];
+}
+
+function normalizeTime(value, fallback) {
+  const clean = String(value || "").trim();
+  return /^\d{2}:\d{2}$/.test(clean) ? clean : fallback;
 }
 
 function sha256Hex(value) {

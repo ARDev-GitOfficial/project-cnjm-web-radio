@@ -666,7 +666,7 @@ async function queryPublicAdsFromDb() {
   const database = db();
   const now = new Date();
   const [settings, ads] = await Promise.all([
-    getAdSettings(),
+    getPublicAdSettings(),
     database`
       SELECT
         id,
@@ -703,6 +703,22 @@ async function queryPublicAdsFromDb() {
     ads: ads.map(serializeAd),
     settings,
   };
+}
+
+async function getPublicAdSettings() {
+  const rows = await db()`
+    SELECT
+      enabled,
+      schedule_enabled AS "scheduleEnabled",
+      start_time AS "startTime",
+      end_time AS "endTime",
+      commercial_runs AS "commercialRuns",
+      program_runs AS "programRuns"
+    FROM ad_settings
+    WHERE id = 'global'
+    LIMIT 1
+  `;
+  return serializeSettings(rows[0]);
 }
 
 function adsFromPublicCache(cache) {
@@ -742,7 +758,14 @@ export async function listPublicAds() {
   const cached = adsFromPublicCache(await readPublicDataCache());
   if (cached) return cached;
 
-  const { adsData } = await refreshPublicDataCache();
+  const adsData = await queryPublicAdsFromDb();
+  const currentCache = await readPublicDataCache();
+  await writePublicDataCache({
+    ads: adsData.ads,
+    settings: adsData.settings,
+    programs: Array.isArray(currentCache?.programs) ? currentCache.programs : defaultProgramRows(),
+    djs: Array.isArray(currentCache?.djs) ? currentCache.djs : [],
+  });
   return adsData;
 }
 
@@ -1095,7 +1118,14 @@ export async function listPublicPrograms() {
   const cached = programsFromPublicCache(await readPublicDataCache());
   if (cached) return cached;
 
-  const { programsData } = await refreshPublicDataCache();
+  const programsData = await queryPublicProgramsFromDb();
+  const currentCache = await readPublicDataCache();
+  await writePublicDataCache({
+    ads: Array.isArray(currentCache?.ads) ? currentCache.ads : [],
+    settings: currentCache?.settings ? serializeSettings(currentCache.settings) : serializeSettings(null),
+    programs: programsData.programs,
+    djs: Array.isArray(currentCache?.djs) ? currentCache.djs : [],
+  });
   return programsData;
 }
 

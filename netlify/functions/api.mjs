@@ -153,9 +153,9 @@ const nowPlayingCacheHeaders = publicCacheHeaders({
   staleWhileRevalidate: 3600,
 });
 const liveStatusCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 20,
-  cdnMaxAge: 45,
-  staleWhileRevalidate: 120,
+  browserMaxAge: 8,
+  cdnMaxAge: 15,
+  staleWhileRevalidate: 45,
 });
 const cameraCacheHeaders = publicCacheHeaders({
   browserMaxAge: 3600,

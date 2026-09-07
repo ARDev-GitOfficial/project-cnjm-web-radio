@@ -10,7 +10,7 @@ import {
 } from "react";
 import { fallbackNowPlaying } from "../data/fallbacks";
 import { fetchNowPlaying } from "../lib/api";
-import { applyLiveStatusTest, readLiveStatusTest, type LiveStatusTestPayload } from "../lib/liveDjs";
+import { applyLiveStatusTest, fetchLiveStatusTest, readLiveStatusTest, type LiveStatusTestPayload } from "../lib/liveDjs";
 import type { NowPlayingResponse } from "../types";
 
 type PlayerContextValue = {
@@ -39,7 +39,8 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
-const NOW_PLAYING_REFRESH_MS = 90_000;
+const NOW_PLAYING_REFRESH_MS = 240_000;
+const LIVE_STATUS_REFRESH_MS = 15_000;
 const LOCAL_SIMULATION_REFRESH_MS = 5_000;
 
 type BrowserAudioContext = typeof AudioContext;
@@ -89,6 +90,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setLiveStatusTest(nextTest);
     setNowPlaying(applyLiveStatusTest(data, nextTest));
     lastNowPlayingRefreshRef.current = Date.now();
+  }, []);
+
+  const refreshLiveStatus = useCallback(async () => {
+    const payload = await fetchLiveStatusTest();
+    const nextTest = payload.liveStatusTest || readLiveStatusTest();
+    liveStatusTestRef.current = nextTest;
+    setLiveStatusTest(nextTest);
+    setNowPlaying((current) => applyLiveStatusTest(current, nextTest));
   }, []);
 
   useEffect(() => {
@@ -145,6 +154,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [refreshNowPlaying]);
+
+  useEffect(() => {
+    void refreshLiveStatus();
+
+    const refreshWhenVisible = () => {
+      if (document.hidden) return;
+      void refreshLiveStatus();
+    };
+
+    const timer = window.setInterval(refreshWhenVisible, LIVE_STATUS_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [refreshLiveStatus]);
 
   useEffect(() => {
     const audio = audioRef.current;

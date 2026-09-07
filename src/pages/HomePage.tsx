@@ -315,7 +315,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
     reconnect,
   } = usePlayer();
   const scheduleLoader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
-  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 600000);
+  const { data: scheduleData } = useAsyncData(scheduleLoader, [], 1200000);
   const currentProgram = useMemo(() => findCurrentScheduleSlot(scheduleData?.days ?? []), [scheduleData]);
   const liveDj = nowPlaying.liveDj;
   const isLiveDj = liveDj?.isLive === true;
@@ -423,7 +423,7 @@ function PageShell({ title, children }: { title: string; children: ReactNode }) 
 
 export function ScheduleStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchSchedule(signal), []);
-  const { data } = useAsyncData(loader, [], 900000);
+  const { data } = useAsyncData(loader, [], 1800000);
   const days = data?.days ?? [];
   const [selectedDayId, setSelectedDayId] = useState("");
   const defaultDay = useMemo(() => pickDefaultScheduleDay(days), [days]);
@@ -595,7 +595,7 @@ export function RequestsStationPage() {
 
 export function ChatStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchChatMessages(signal), []);
-  const { data } = useAsyncData(loader, [], 120000);
+  const { data } = useAsyncData(loader, [], 300000);
   const [name, setName] = useState("Ouvinte");
   const [text, setText] = useState("");
   const [localMessages, setLocalMessages] = useState<{ id: string; author: string; text: string }[]>([]);

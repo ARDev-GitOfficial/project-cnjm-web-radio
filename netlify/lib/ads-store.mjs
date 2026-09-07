@@ -26,6 +26,8 @@ const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ADS_BLOB_STORE = "cnjm-ad-images";
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
+const PUBLIC_DJS_CACHE_KEY = "public-djs-cache-v1.json";
+const PUBLIC_DJS_MEMORY_TTL_MS = 30 * 60 * 1000;
 const LIVE_STATUS_PUBLIC_CACHE_KEY = "public-live-status-cache-v1.json";
 const LIVE_STATUS_MEMORY_TTL_MS = 5 * 60 * 1000;
 const IMAGE_CONTENT_TYPES = new Set(["image/png", "image/webp"]);
@@ -56,6 +58,7 @@ const DAY_LABELS = {
 };
 
 let publicDataMemoryCache = null;
+let publicDjsMemoryCache = null;
 let liveStatusMemoryCache = null;
 
 function db() {
@@ -135,6 +138,47 @@ async function writePublicDataCache(payload) {
     await adImageStore().setJSON(PUBLIC_DATA_CACHE_KEY, cachePayload);
   } catch {
     // Public reads can fall back to the database if the lightweight cache is unavailable.
+  }
+}
+
+async function readPublicDjsCache() {
+  if (
+    Array.isArray(publicDjsMemoryCache?.data) &&
+    Date.now() - publicDjsMemoryCache.savedAt < PUBLIC_DJS_MEMORY_TTL_MS
+  ) {
+    return publicDjsMemoryCache.data;
+  }
+
+  try {
+    const cache = await adImageStore().get(PUBLIC_DJS_CACHE_KEY, { type: "json" });
+    if (!Array.isArray(cache?.djs)) return null;
+    const djs = cache.djs.map(serializeDj).slice(0, MAX_DJS);
+
+    publicDjsMemoryCache = {
+      data: djs,
+      savedAt: Date.now(),
+    };
+    return djs;
+  } catch {
+    return null;
+  }
+}
+
+async function writePublicDjsCache(djs) {
+  const normalized = Array.isArray(djs) ? djs.map(serializeDj).slice(0, MAX_DJS) : [];
+  publicDjsMemoryCache = {
+    data: normalized,
+    savedAt: Date.now(),
+  };
+
+  try {
+    await adImageStore().setJSON(PUBLIC_DJS_CACHE_KEY, {
+      version: 1,
+      cachedAt: new Date().toISOString(),
+      djs: normalized,
+    });
+  } catch {
+    // Public reads can still use in-memory cache or fallback sources.
   }
 }
 
@@ -682,6 +726,7 @@ async function refreshPublicDataCache() {
     programs: programsData.programs,
     djs,
   });
+  await writePublicDjsCache(djs);
   return { adsData, programsData, djs };
 }
 
@@ -1083,10 +1128,17 @@ function djsFromPublicCache(cache) {
 }
 
 export async function listPublicDjs() {
-  const cached = djsFromPublicCache(await readPublicDataCache());
-  if (cached) return cached;
+  const directCached = await readPublicDjsCache();
+  if (directCached) return directCached;
 
-  const { djs } = await refreshPublicDataCache();
+  const cached = djsFromPublicCache(await readPublicDataCache());
+  if (cached) {
+    await writePublicDjsCache(cached);
+    return cached;
+  }
+
+  const djs = await queryPublicDjsFromDb();
+  await writePublicDjsCache(djs);
   return djs;
 }
 
@@ -1128,11 +1180,12 @@ async function ensureLiveStatusTable() {
 }
 
 export async function getLiveStatusTest(options = {}) {
-  const { ensureTable = true, useCache = false } = options;
-  if (useCache) {
+  const { ensureTable = true, useCache = false, cacheOnly = false } = options;
+  if (useCache || cacheOnly) {
     const cached = await readLiveStatusCache();
     if (cached) return cached;
   }
+  if (cacheOnly) return defaultLiveStatus();
 
   if (ensureTable) {
     await ensureLiveStatusTable();

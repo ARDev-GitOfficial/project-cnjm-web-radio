@@ -152,6 +152,11 @@ const nowPlayingCacheHeaders = publicCacheHeaders({
   cdnMaxAge: 900,
   staleWhileRevalidate: 3600,
 });
+const liveStatusCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 20,
+  cdnMaxAge: 45,
+  staleWhileRevalidate: 120,
+});
 const cameraCacheHeaders = publicCacheHeaders({
   browserMaxAge: 3600,
   cdnMaxAge: 14400,
@@ -726,7 +731,7 @@ async function handleNowPlaying() {
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
       listPublicDjs(),
-      getLiveStatusTest({ ensureTable: false, useCache: true }).catch(() => ({ state: "off" })),
+      getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true }).catch(() => ({ state: "off" })),
     ]);
     const history = parseHistory(historyHtml);
     const rawSongTitle = stats.songtitle ?? "";
@@ -761,7 +766,7 @@ async function handleNowPlaying() {
       fetchedAt: new Date().toISOString(),
     }, liveStatusTest), nowPlayingCacheHeaders);
   } catch {
-    const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true }).catch(() => ({ state: "off" }));
+    const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true }).catch(() => ({ state: "off" }));
     return json(200, applyLiveStatusSimulation({
       ok: false,
       source: "fallback",
@@ -1212,13 +1217,16 @@ async function handleLiveStatusTest(event, pathname) {
 
   if (method === "GET") {
     try {
-      const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true });
+      const adminMode = isAdminRequest(event);
+      const liveStatusTest = adminMode
+        ? await getLiveStatusTest({ ensureTable: true, useCache: false })
+        : await getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true });
       return json(200, {
         ok: true,
         source: "database",
         liveStatusTest,
         fetchedAt: new Date().toISOString(),
-      }, nowPlayingCacheHeaders);
+      }, adminMode ? {} : liveStatusCacheHeaders);
     } catch (error) {
       return json(200, {
         ok: false,
@@ -1226,7 +1234,7 @@ async function handleLiveStatusTest(event, pathname) {
         liveStatusTest: { state: "off" },
         fetchedAt: new Date().toISOString(),
         message: error instanceof Error && error.message ? error.message : "Audiência indisponível.",
-      }, nowPlayingCacheHeaders);
+      }, liveStatusCacheHeaders);
     }
   }
 

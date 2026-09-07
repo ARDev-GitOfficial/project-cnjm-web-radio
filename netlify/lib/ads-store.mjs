@@ -26,6 +26,8 @@ const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ADS_BLOB_STORE = "cnjm-ad-images";
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
+const LIVE_STATUS_PUBLIC_CACHE_KEY = "public-live-status-cache-v1.json";
+const LIVE_STATUS_MEMORY_TTL_MS = 5 * 60 * 1000;
 const IMAGE_CONTENT_TYPES = new Set(["image/png", "image/webp"]);
 const IS_LOCAL_NETLIFY_DEV = process.env.NETLIFY_DEV === "true";
 const LEGACY_ADMIN_LOGIN = "AdminRoots";
@@ -54,6 +56,7 @@ const DAY_LABELS = {
 };
 
 let publicDataMemoryCache = null;
+let liveStatusMemoryCache = null;
 
 function db() {
   return getDatabase().sql;
@@ -132,6 +135,51 @@ async function writePublicDataCache(payload) {
     await adImageStore().setJSON(PUBLIC_DATA_CACHE_KEY, cachePayload);
   } catch {
     // Public reads can fall back to the database if the lightweight cache is unavailable.
+  }
+}
+
+async function readLiveStatusCache() {
+  if (
+    liveStatusMemoryCache?.data &&
+    Date.now() - liveStatusMemoryCache.savedAt < LIVE_STATUS_MEMORY_TTL_MS
+  ) {
+    return liveStatusMemoryCache.data;
+  }
+
+  try {
+    const cache = await adImageStore().get(LIVE_STATUS_PUBLIC_CACHE_KEY, { type: "json" });
+    if (!cache || typeof cache !== "object") return null;
+
+    const liveStatusTest = cache.liveStatusTest && typeof cache.liveStatusTest === "object"
+      ? serializeLiveStatus(cache.liveStatusTest)
+      : null;
+    if (!liveStatusTest) return null;
+
+    liveStatusMemoryCache = {
+      data: liveStatusTest,
+      savedAt: Date.now(),
+    };
+    return liveStatusTest;
+  } catch {
+    return null;
+  }
+}
+
+async function writeLiveStatusCache(liveStatusTest) {
+  const normalized = serializeLiveStatus(liveStatusTest);
+  liveStatusMemoryCache = {
+    data: normalized,
+    savedAt: Date.now(),
+  };
+
+  try {
+    await adImageStore().setJSON(LIVE_STATUS_PUBLIC_CACHE_KEY, {
+      version: 1,
+      cachedAt: new Date().toISOString(),
+      liveStatusTest: normalized,
+    });
+  } catch {
+    // Public reads can fall back to the database/default status if the cache is unavailable.
   }
 }
 
@@ -951,7 +999,6 @@ export async function updateAdStats(id, field) {
 }
 
 async function queryPublicProgramsFromDb() {
-  await ensureDefaultPrograms();
   const programs = await db()`
     SELECT
       id,
@@ -972,6 +1019,14 @@ async function queryPublicProgramsFromDb() {
     ORDER BY day_id ASC, sort_order ASC, start_time ASC
   `;
   const serialized = programs.map(serializeProgram).sort(sortPrograms);
+  if (!serialized.length) {
+    const fallbackPrograms = defaultProgramRows().map(serializeProgram).sort(sortPrograms);
+    return {
+      programs: fallbackPrograms,
+      days: programsToScheduleDays(fallbackPrograms),
+      currentProgram: currentProgramFromPrograms(fallbackPrograms),
+    };
+  }
 
   return {
     programs: serialized,
@@ -1035,6 +1090,10 @@ export async function listPublicDjs() {
   return djs;
 }
 
+function defaultLiveStatus() {
+  return serializeLiveStatus({ state: "off" });
+}
+
 let liveStatusTableReady = false;
 
 async function ensureLiveStatusTable() {
@@ -1068,28 +1127,47 @@ async function ensureLiveStatusTable() {
   liveStatusTableReady = true;
 }
 
-export async function getLiveStatusTest() {
-  await ensureLiveStatusTable();
+export async function getLiveStatusTest(options = {}) {
+  const { ensureTable = true, useCache = false } = options;
+  if (useCache) {
+    const cached = await readLiveStatusCache();
+    if (cached) return cached;
+  }
 
-  const rows = await db()`
-    SELECT
-      state,
-      dj_name AS "djName",
-      program_name AS "programName",
-      listeners,
-      visitors,
-      movement_percent AS "movementPercent",
-      live_boost_percent AS "liveBoostPercent",
-      growth_percent AS "growthPercent",
-      seed,
-      updated_at AS "updatedAt",
-      config
-    FROM live_status_simulation
-    WHERE id = 'global'
-    LIMIT 1
-  `;
+  if (ensureTable) {
+    await ensureLiveStatusTable();
+  }
 
-  return serializeLiveStatus(rows[0]);
+  try {
+    const rows = await db()`
+      SELECT
+        state,
+        dj_name AS "djName",
+        program_name AS "programName",
+        listeners,
+        visitors,
+        movement_percent AS "movementPercent",
+        live_boost_percent AS "liveBoostPercent",
+        growth_percent AS "growthPercent",
+        seed,
+        updated_at AS "updatedAt",
+        config
+      FROM live_status_simulation
+      WHERE id = 'global'
+      LIMIT 1
+    `;
+
+    const liveStatusTest = rows[0] ? serializeLiveStatus(rows[0]) : defaultLiveStatus();
+    if (useCache) await writeLiveStatusCache(liveStatusTest);
+    return liveStatusTest;
+  } catch (error) {
+    if (!ensureTable) {
+      const fallback = defaultLiveStatus();
+      if (useCache) await writeLiveStatusCache(fallback);
+      return fallback;
+    }
+    throw error;
+  }
 }
 
 export async function saveLiveStatusTest(payload) {
@@ -1156,8 +1234,9 @@ export async function saveLiveStatusTest(payload) {
       updated_at AS "updatedAt",
       config
   `;
-
-  return serializeLiveStatus(row);
+  const liveStatusTest = serializeLiveStatus(row);
+  await writeLiveStatusCache(liveStatusTest);
+  return liveStatusTest;
 }
 
 export async function listAdminPrograms() {
@@ -1516,6 +1595,47 @@ async function ensureDefaultPrograms() {
       ('sat-tarde-noite', 'Sat', 'Sábado', '12:00', '23:59', 'Sábado Reggae Vibes', 'Web Rádio Conexão Jamaica', 3)
     ON CONFLICT (id) DO NOTHING
   `;
+}
+
+function defaultProgramRows() {
+  return DAY_ORDER.flatMap((dayId) => {
+    const dayLabel = DAY_LABELS[dayId];
+    return [
+      {
+        id: `${dayId.toLowerCase()}-madrugada`,
+        dayId,
+        dayLabel,
+        startTime: "00:00",
+        endTime: "04:59",
+        program: "Madrugada Reggae",
+        host: "Web Rádio Conexão Jamaica",
+        sortOrder: 1,
+        active: true,
+      },
+      {
+        id: `${dayId.toLowerCase()}-manha`,
+        dayId,
+        dayLabel,
+        startTime: "05:00",
+        endTime: "11:59",
+        program: "Conexão Jamaica Manhã",
+        host: "Web Rádio Conexão Jamaica",
+        sortOrder: 2,
+        active: true,
+      },
+      {
+        id: `${dayId.toLowerCase()}-tarde-noite`,
+        dayId,
+        dayLabel,
+        startTime: "12:00",
+        endTime: "23:59",
+        program: dayId === "Sat" ? "Sábado Reggae Vibes" : dayId === "Sun" ? "Domingo Roots" : "Reggae em todas as vertentes",
+        host: "Web Rádio Conexão Jamaica",
+        sortOrder: 3,
+        active: true,
+      },
+    ];
+  });
 }
 
 function currentDayId(now = new Date()) {

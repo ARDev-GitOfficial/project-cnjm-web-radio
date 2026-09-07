@@ -595,7 +595,7 @@ export function RequestsStationPage() {
 
 export function ChatStationPage() {
   const loader = useCallback((signal: AbortSignal) => fetchChatMessages(signal), []);
-  const { data } = useAsyncData(loader, [], 120000);
+  const { data } = useAsyncData(loader, [], 300000);
   const [name, setName] = useState("Ouvinte");
   const [text, setText] = useState("");
   const [localMessages, setLocalMessages] = useState<{ id: string; author: string; text: string }[]>([]);

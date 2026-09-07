@@ -138,29 +138,29 @@ function publicCacheHeaders({ browserMaxAge = 60, cdnMaxAge = 300, staleWhileRev
 }
 
 const publicAdsCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 600,
-  cdnMaxAge: 1800,
-  staleWhileRevalidate: 3600,
+  browserMaxAge: 1800,
+  cdnMaxAge: 7200,
+  staleWhileRevalidate: 21600,
 });
 const publicProgramsCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 900,
-  cdnMaxAge: 3600,
-  staleWhileRevalidate: 7200,
+  browserMaxAge: 1800,
+  cdnMaxAge: 7200,
+  staleWhileRevalidate: 21600,
 });
 const nowPlayingCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 90,
-  cdnMaxAge: 180,
-  staleWhileRevalidate: 900,
+  browserMaxAge: 240,
+  cdnMaxAge: 900,
+  staleWhileRevalidate: 3600,
 });
 const cameraCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 1800,
-  cdnMaxAge: 3600,
+  browserMaxAge: 3600,
+  cdnMaxAge: 14400,
   staleWhileRevalidate: 86400,
 });
 const chatCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 45,
-  cdnMaxAge: 90,
-  staleWhileRevalidate: 240,
+  browserMaxAge: 180,
+  cdnMaxAge: 600,
+  staleWhileRevalidate: 1800,
 });
 const publicImageCacheHeaders = {
   "cache-control": "public, max-age=31536000, immutable",
@@ -726,7 +726,7 @@ async function handleNowPlaying() {
       fetchText(HISTORY_URL),
       fetchCoverUrl(),
       listPublicDjs(),
-      getLiveStatusTest().catch(() => ({ state: "off" })),
+      getLiveStatusTest({ ensureTable: false, useCache: true }).catch(() => ({ state: "off" })),
     ]);
     const history = parseHistory(historyHtml);
     const rawSongTitle = stats.songtitle ?? "";
@@ -761,7 +761,7 @@ async function handleNowPlaying() {
       fetchedAt: new Date().toISOString(),
     }, liveStatusTest), nowPlayingCacheHeaders);
   } catch {
-    const liveStatusTest = await getLiveStatusTest().catch(() => ({ state: "off" }));
+    const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true }).catch(() => ({ state: "off" }));
     return json(200, applyLiveStatusSimulation({
       ok: false,
       source: "fallback",
@@ -1212,7 +1212,7 @@ async function handleLiveStatusTest(event, pathname) {
 
   if (method === "GET") {
     try {
-      const liveStatusTest = await getLiveStatusTest();
+      const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true });
       return json(200, {
         ok: true,
         source: "database",

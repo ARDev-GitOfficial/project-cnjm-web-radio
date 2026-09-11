@@ -23,14 +23,15 @@ Se preencher o comando manualmente no painel do Netlify, use o mesmo comando do 
 
 ## Anúncios globais
 
-O painel `/ads` só salva para todos os visitantes quando o deploy usa Netlify Functions, Netlify Database e Netlify Blobs. Em `localhost`, ele pode cair em modo local apenas para teste.
+O painel `/ads` salva anúncios, programação, DJs e Central de Audiência em Netlify Blobs. As funções Netlify protegem as rotas administrativas e servem as imagens enviadas. Em `localhost`, ele pode cair em modo local apenas para teste.
 
 No Netlify, confirme:
 
 - os plugins antigos de AMP/feed/imagem estão removidos;
-- Netlify Database está ativo no projeto;
-- as migrações em `netlify/database/migrations` foram enviadas;
+- Netlify Blobs está disponível para o projeto;
 - as variáveis de admin foram configuradas no painel do site.
+
+O site não depende de Netlify Database ou de migrações SQL. O conteúdo é mantido em um documento versionado no Blob e as imagens WebP permanecem em armazenamento separado, evitando consumo de tempo ativo de banco.
 
 ## Métricas econômicas e audiência
 

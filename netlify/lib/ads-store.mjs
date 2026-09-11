@@ -1,5 +1,4 @@
 import { getStore } from "@netlify/blobs";
-import { getDatabase } from "@netlify/database";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const AD_BANNER_WIDTH = 1700;
@@ -24,6 +23,9 @@ const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
 const LIVE_TEST_STATES = new Set(["online", "connecting", "offline", "live", "off"]);
 const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ADS_BLOB_STORE = "cnjm-ad-images";
+const CONTENT_BLOB_STORE = "cnjm-site-content";
+const CONTENT_BLOB_KEY = "site-content-v1.json";
+const CONTENT_MEMORY_TTL_MS = 30 * 1000;
 const PUBLIC_DATA_CACHE_KEY = "public-data-cache-v1.json";
 const PUBLIC_DATA_MEMORY_TTL_MS = 15 * 60 * 1000;
 const PUBLIC_DJS_CACHE_KEY = "public-djs-cache-v1.json";
@@ -60,94 +62,8 @@ const DAY_LABELS = {
 let publicDataMemoryCache = null;
 let publicDjsMemoryCache = null;
 let liveStatusMemoryCache = null;
-let contentSchemaReady = false;
-let contentSchemaPromise = null;
-
-function db() {
-  return getDatabase().sql;
-}
-
-async function ensureContentSchema() {
-  if (contentSchemaReady) return;
-  if (contentSchemaPromise) return contentSchemaPromise;
-
-  contentSchemaPromise = (async () => {
-    const database = db();
-
-    await database`
-      CREATE TABLE IF NOT EXISTS site_ads (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL DEFAULT '',
-        description TEXT NOT NULL DEFAULT '',
-        image_url TEXT NOT NULL DEFAULT '',
-        image_key TEXT NOT NULL DEFAULT '',
-        image_width INTEGER,
-        image_height INTEGER,
-        image_content_type TEXT,
-        image_size INTEGER,
-        link_url TEXT NOT NULL DEFAULT '',
-        button_label TEXT NOT NULL DEFAULT 'Abrir anuncio',
-        placement TEXT NOT NULL DEFAULT 'banner',
-        section TEXT NOT NULL DEFAULT 'Principal',
-        active BOOLEAN NOT NULL DEFAULT TRUE,
-        impressions INTEGER NOT NULL DEFAULT 0,
-        clicks INTEGER NOT NULL DEFAULT 0,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        starts_at TIMESTAMPTZ,
-        ends_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-    await database`
-      CREATE TABLE IF NOT EXISTS ad_settings (
-        id TEXT PRIMARY KEY DEFAULT 'global',
-        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-        start_time TEXT NOT NULL DEFAULT '08:00',
-        end_time TEXT NOT NULL DEFAULT '22:00',
-        commercial_runs INTEGER NOT NULL DEFAULT 3,
-        program_runs INTEGER NOT NULL DEFAULT 1,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-    await database`
-      CREATE TABLE IF NOT EXISTS station_programs (
-        id TEXT PRIMARY KEY,
-        day_id TEXT NOT NULL DEFAULT 'Mon',
-        day_label TEXT NOT NULL DEFAULT 'Segunda',
-        start_time TEXT NOT NULL DEFAULT '00:00',
-        end_time TEXT NOT NULL DEFAULT '23:59',
-        program TEXT NOT NULL DEFAULT '',
-        host TEXT NOT NULL DEFAULT 'Web Radio Conexao Jamaica',
-        logo_url TEXT NOT NULL DEFAULT '',
-        logo_key TEXT NOT NULL DEFAULT '',
-        active BOOLEAN NOT NULL DEFAULT TRUE,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-    await database`
-      CREATE TABLE IF NOT EXISTS station_djs (
-        id TEXT PRIMARY KEY,
-        signatures TEXT NOT NULL DEFAULT '',
-        dj_name TEXT NOT NULL DEFAULT '',
-        program_name TEXT NOT NULL DEFAULT '',
-        active BOOLEAN NOT NULL DEFAULT TRUE,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `;
-
-    contentSchemaReady = true;
-  })().finally(() => {
-    contentSchemaPromise = null;
-  });
-
-  return contentSchemaPromise;
-}
+let siteContentMemoryCache = null;
+let siteContentWriteQueue = Promise.resolve();
 
 function firstEnv(keys) {
   for (const key of keys) {
@@ -172,9 +88,17 @@ function blobConfigError() {
 }
 
 function adImageStore() {
+  return namedBlobStore(ADS_BLOB_STORE);
+}
+
+function siteContentStore() {
+  return namedBlobStore(CONTENT_BLOB_STORE);
+}
+
+function namedBlobStore(name) {
   try {
     const manualConfig = manualBlobConfig();
-    return manualConfig ? getStore({ name: ADS_BLOB_STORE, ...manualConfig }) : getStore(ADS_BLOB_STORE);
+    return manualConfig ? getStore({ name, ...manualConfig }) : getStore(name);
   } catch (error) {
     if (error?.name === "MissingBlobsEnvironmentError") {
       throw blobConfigError();
@@ -221,7 +145,7 @@ async function writePublicDataCache(payload) {
   try {
     await adImageStore().setJSON(PUBLIC_DATA_CACHE_KEY, cachePayload);
   } catch {
-    // Public reads can fall back to the database if the lightweight cache is unavailable.
+    // The canonical content document remains available even if this public cache cannot update.
   }
 }
 
@@ -307,8 +231,112 @@ async function writeLiveStatusCache(liveStatusTest) {
       liveStatusTest: normalized,
     });
   } catch {
-    // Public reads can fall back to the database/default status if the cache is unavailable.
+    // The canonical content document remains available even if this public cache cannot update.
   }
+}
+
+function defaultSiteContent() {
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    ads: [],
+    settings: serializeSettings(null),
+    programs: defaultProgramRows().map(serializeProgram),
+    djs: [],
+    liveStatusTest: defaultLiveStatus(),
+  };
+}
+
+function serializeSiteContent(value = {}) {
+  const defaults = defaultSiteContent();
+  return {
+    version: 1,
+    updatedAt: iso(value.updatedAt) || new Date().toISOString(),
+    ads: Array.isArray(value.ads) ? value.ads.map(serializeAd).slice(0, MAX_ADS) : defaults.ads,
+    settings: serializeSettings(value.settings),
+    programs: Array.isArray(value.programs)
+      ? value.programs.map(serializeProgram).slice(0, MAX_ADS).sort(sortPrograms)
+      : defaults.programs,
+    djs: Array.isArray(value.djs) ? value.djs.map(serializeDj).slice(0, MAX_DJS) : defaults.djs,
+    liveStatusTest: serializeLiveStatus(value.liveStatusTest || defaults.liveStatusTest),
+  };
+}
+
+function cloneSiteContent(content) {
+  return JSON.parse(JSON.stringify(content));
+}
+
+async function createContentFromLegacyBlobs() {
+  const [legacyPublic, legacyDjs, legacyLive] = await Promise.all([
+    readPublicDataCache(),
+    readPublicDjsCache(),
+    readLiveStatusCache(),
+  ]);
+
+  return serializeSiteContent({
+    ads: legacyPublic?.ads,
+    settings: legacyPublic?.settings,
+    programs: legacyPublic?.programs,
+    djs: Array.isArray(legacyPublic?.djs) && legacyPublic.djs.length ? legacyPublic.djs : legacyDjs,
+    liveStatusTest: legacyLive,
+  });
+}
+
+async function readSiteContent({ forceRefresh = false } = {}) {
+  if (
+    !forceRefresh &&
+    siteContentMemoryCache?.content &&
+    Date.now() - siteContentMemoryCache.savedAt < CONTENT_MEMORY_TTL_MS
+  ) {
+    return siteContentMemoryCache.content;
+  }
+
+  const stored = await siteContentStore().get(CONTENT_BLOB_KEY, { type: "json" });
+  const content = stored && typeof stored === "object"
+    ? serializeSiteContent(stored)
+    : await createContentFromLegacyBlobs();
+
+  if (!stored) {
+    await siteContentStore().setJSON(CONTENT_BLOB_KEY, content);
+  }
+
+  siteContentMemoryCache = {
+    content,
+    savedAt: Date.now(),
+  };
+  return content;
+}
+
+async function publishSiteContent(content) {
+  const now = new Date();
+  const ads = visibleAds(content.ads, now);
+  const programs = content.programs.filter((program) => program.active).map(serializeProgram).sort(sortPrograms);
+  const djs = content.djs.filter((dj) => dj.active).map(serializeDj).slice(0, MAX_DJS);
+
+  await Promise.all([
+    writePublicDataCache({ ads, settings: content.settings, programs, djs }),
+    writePublicDjsCache(djs),
+    writeLiveStatusCache(content.liveStatusTest),
+  ]);
+}
+
+async function updateSiteContent(mutator) {
+  const write = async () => {
+    const current = await readSiteContent({ forceRefresh: true });
+    const next = serializeSiteContent(await mutator(cloneSiteContent(current)));
+    next.updatedAt = new Date().toISOString();
+    await siteContentStore().setJSON(CONTENT_BLOB_KEY, next);
+    siteContentMemoryCache = {
+      content: next,
+      savedAt: Date.now(),
+    };
+    await publishSiteContent(next);
+    return next;
+  };
+
+  const task = siteContentWriteQueue.then(write, write);
+  siteContentWriteQueue = task.catch(() => undefined);
+  return task;
 }
 
 function normalizeOptionalUrl(value) {
@@ -746,903 +774,247 @@ function normalizeDjSignatures(value) {
     .slice(0, 12);
 }
 
-async function queryPublicAdsFromDb() {
-  await ensureContentSchema();
-  const database = db();
-  const now = new Date();
-  const [settings, ads] = await Promise.all([
-    getPublicAdSettings(),
-    database`
-      SELECT
-        id,
-        title,
-        description,
-        image_url AS "imageUrl",
-        image_key AS "imageKey",
-        image_width AS "imageWidth",
-        image_height AS "imageHeight",
-        image_content_type AS "imageContentType",
-        image_size AS "imageSize",
-        link_url AS "linkUrl",
-        button_label AS "buttonLabel",
-        placement,
-        section,
-        active,
-        impressions,
-        clicks,
-        sort_order AS "sortOrder",
-        starts_at AS "startsAt",
-        ends_at AS "endsAt",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM site_ads
-      WHERE active = TRUE
-        AND (starts_at IS NULL OR starts_at <= ${now})
-        AND (ends_at IS NULL OR ends_at >= ${now})
-      ORDER BY sort_order ASC, updated_at DESC
-      LIMIT ${MAX_ADS}
-    `,
-  ]);
-
-  return {
-    ads: ads.map(serializeAd),
-    settings,
-  };
+function visibleAds(ads, now = new Date()) {
+  const time = now.getTime();
+  return ads
+    .map(serializeAd)
+    .filter((ad) => {
+      if (!ad.active) return false;
+      const startsAt = ad.startsAt ? new Date(ad.startsAt).getTime() : null;
+      const endsAt = ad.endsAt ? new Date(ad.endsAt).getTime() : null;
+      return (!startsAt || startsAt <= time) && (!endsAt || endsAt >= time);
+    })
+    .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
+    .slice(0, MAX_ADS);
 }
 
-async function getPublicAdSettings() {
-  const rows = await db()`
-    SELECT
-      enabled,
-      schedule_enabled AS "scheduleEnabled",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      commercial_runs AS "commercialRuns",
-      program_runs AS "programRuns"
-    FROM ad_settings
-    WHERE id = 'global'
-    LIMIT 1
-  `;
-  return serializeSettings(rows[0]);
-}
-
-function adsFromPublicCache(cache) {
-  if (!Array.isArray(cache?.ads)) return null;
+function programsData(programs, { publicOnly = false } = {}) {
+  const serialized = programs
+    .map(serializeProgram)
+    .filter((program) => !publicOnly || program.active)
+    .sort(sortPrograms);
+  const fallback = serialized.length || !publicOnly
+    ? serialized
+    : defaultProgramRows().map(serializeProgram).sort(sortPrograms);
 
   return {
-    ads: cache.ads.map(serializeAd).slice(0, MAX_ADS),
-    settings: serializeSettings(cache.settings),
+    programs: fallback,
+    days: programsToScheduleDays(fallback),
+    currentProgram: currentProgramFromPrograms(fallback),
   };
 }
 
 async function refreshPublicDataCache() {
-  const [adsData, programsData, djs] = await Promise.all([
-    queryPublicAdsFromDb(),
-    queryPublicProgramsFromDb(),
-    queryPublicDjsFromDb(),
-  ]);
-  await writePublicDataCache({
-    ads: adsData.ads,
-    settings: adsData.settings,
-    programs: programsData.programs,
-    djs,
-  });
-  await writePublicDjsCache(djs);
-  return { adsData, programsData, djs };
-}
-
-async function refreshPublicDataCacheBestEffort() {
-  try {
-    await refreshPublicDataCache();
-  } catch {
-    // Admin writes should still succeed if cache refresh fails.
-  }
+  const content = await readSiteContent();
+  await publishSiteContent(content);
+  return {
+    adsData: { ads: visibleAds(content.ads), settings: content.settings },
+    programsData: programsData(content.programs, { publicOnly: true }),
+    djs: content.djs
+      .filter((dj) => dj.active)
+      .map(serializeDj)
+      .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
+      .slice(0, MAX_DJS),
+  };
 }
 
 export async function listPublicAds() {
-  const cached = adsFromPublicCache(await readPublicDataCache());
-  if (cached) return cached;
-
-  const adsData = await queryPublicAdsFromDb();
-  const currentCache = await readPublicDataCache();
-  await writePublicDataCache({
-    ads: adsData.ads,
-    settings: adsData.settings,
-    programs: Array.isArray(currentCache?.programs) ? currentCache.programs : defaultProgramRows(),
-    djs: Array.isArray(currentCache?.djs) ? currentCache.djs : [],
-  });
-  return adsData;
+  const content = await readSiteContent();
+  return {
+    ads: visibleAds(content.ads),
+    settings: serializeSettings(content.settings),
+  };
 }
 
 export async function listAdminAds() {
-  await ensureContentSchema();
-  const database = db();
-  const [settings, ads] = await Promise.all([
-    getAdSettings(),
-    database`
-      SELECT
-        id,
-        title,
-        description,
-        image_url AS "imageUrl",
-        image_key AS "imageKey",
-        image_width AS "imageWidth",
-        image_height AS "imageHeight",
-        image_content_type AS "imageContentType",
-        image_size AS "imageSize",
-        link_url AS "linkUrl",
-        button_label AS "buttonLabel",
-        placement,
-        section,
-        active,
-        impressions,
-        clicks,
-        sort_order AS "sortOrder",
-        starts_at AS "startsAt",
-        ends_at AS "endsAt",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM site_ads
-      ORDER BY sort_order ASC, updated_at DESC
-      LIMIT ${MAX_ADS}
-    `,
-  ]);
-
+  const content = await readSiteContent();
   return {
-    ads: ads.map(serializeAd),
-    settings,
+    ads: content.ads.map(serializeAd).sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt))),
+    settings: serializeSettings(content.settings),
   };
 }
 
 export async function getAdSettings() {
-  await ensureContentSchema();
-  const database = db();
-  const rows = await database`
-    SELECT
-      enabled,
-      schedule_enabled AS "scheduleEnabled",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      commercial_runs AS "commercialRuns",
-      program_runs AS "programRuns"
-    FROM ad_settings
-    WHERE id = 'global'
-    LIMIT 1
-  `;
-  if (rows[0]) return serializeSettings(rows[0]);
-
-  const [created] = await database`
-    INSERT INTO ad_settings (id)
-    VALUES ('global')
-    ON CONFLICT (id) DO NOTHING
-    RETURNING
-      enabled,
-      schedule_enabled AS "scheduleEnabled",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      commercial_runs AS "commercialRuns",
-      program_runs AS "programRuns"
-  `;
-  if (!created) return serializeSettings(null);
-
-  return serializeSettings(created);
+  return serializeSettings((await readSiteContent()).settings);
 }
 
 export async function saveAdSettings(payload) {
-  await ensureContentSchema();
-  const normalized = normalizeSettingsPayload(payload);
-  const [settings] = await db()`
-    INSERT INTO ad_settings (
-      id,
-      enabled,
-      schedule_enabled,
-      start_time,
-      end_time,
-      commercial_runs,
-      program_runs,
-      updated_at
-    )
-    VALUES (
-      'global',
-      ${normalized.enabled},
-      ${normalized.scheduleEnabled},
-      ${normalized.startTime},
-      ${normalized.endTime},
-      ${normalized.commercialRuns},
-      ${normalized.programRuns},
-      ${normalized.updatedAt}
-    )
-    ON CONFLICT (id) DO UPDATE SET
-      enabled = EXCLUDED.enabled,
-      schedule_enabled = EXCLUDED.schedule_enabled,
-      start_time = EXCLUDED.start_time,
-      end_time = EXCLUDED.end_time,
-      commercial_runs = EXCLUDED.commercial_runs,
-      program_runs = EXCLUDED.program_runs,
-      updated_at = EXCLUDED.updated_at
-    RETURNING
-      enabled,
-      schedule_enabled AS "scheduleEnabled",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      commercial_runs AS "commercialRuns",
-      program_runs AS "programRuns"
-  `;
-
-  const serialized = serializeSettings(settings);
-  await refreshPublicDataCacheBestEffort();
-  return serialized;
+  const settings = serializeSettings(normalizeSettingsPayload(payload));
+  await updateSiteContent((content) => ({ ...content, settings }));
+  return settings;
 }
 
 export async function saveAd(payload) {
-  await ensureContentSchema();
-  const normalized = normalizeAdPayload(payload);
-  const database = db();
-  const [currentAd] = await database`
-    SELECT image_key AS "imageKey"
-    FROM site_ads
-    WHERE id = ${normalized.id}
-    LIMIT 1
-  `;
-  const [ad] = await database`
-    INSERT INTO site_ads (
-      id,
-      title,
-      description,
-      image_url,
-      image_key,
-      image_width,
-      image_height,
-      image_content_type,
-      image_size,
-      link_url,
-      button_label,
-      placement,
-      section,
-      active,
-      impressions,
-      clicks,
-      sort_order,
-      starts_at,
-      ends_at,
-      created_at,
-      updated_at
-    )
-    VALUES (
-      ${normalized.id},
-      ${normalized.title},
-      ${normalized.description},
-      ${normalized.imageUrl},
-      ${normalized.imageKey},
-      ${normalized.imageWidth},
-      ${normalized.imageHeight},
-      ${normalized.imageContentType},
-      ${normalized.imageSize},
-      ${normalized.linkUrl},
-      ${normalized.buttonLabel},
-      ${normalized.placement},
-      ${normalized.section},
-      ${normalized.active},
-      ${normalized.impressions},
-      ${normalized.clicks},
-      ${normalized.sortOrder},
-      ${normalized.startsAt},
-      ${normalized.endsAt},
-      ${normalized.createdAt},
-      ${normalized.updatedAt}
-    )
-    ON CONFLICT (id) DO UPDATE SET
-      title = EXCLUDED.title,
-      description = EXCLUDED.description,
-      image_url = EXCLUDED.image_url,
-      image_key = EXCLUDED.image_key,
-      image_width = EXCLUDED.image_width,
-      image_height = EXCLUDED.image_height,
-      image_content_type = EXCLUDED.image_content_type,
-      image_size = EXCLUDED.image_size,
-      link_url = EXCLUDED.link_url,
-      button_label = EXCLUDED.button_label,
-      placement = EXCLUDED.placement,
-      section = EXCLUDED.section,
-      active = EXCLUDED.active,
-      sort_order = EXCLUDED.sort_order,
-      starts_at = EXCLUDED.starts_at,
-      ends_at = EXCLUDED.ends_at,
-      updated_at = EXCLUDED.updated_at
-    RETURNING
-      id,
-      title,
-      description,
-      image_url AS "imageUrl",
-      image_key AS "imageKey",
-      image_width AS "imageWidth",
-      image_height AS "imageHeight",
-      image_content_type AS "imageContentType",
-      image_size AS "imageSize",
-      link_url AS "linkUrl",
-      button_label AS "buttonLabel",
-      placement,
-      section,
-      active,
-      impressions,
-      clicks,
-      sort_order AS "sortOrder",
-      starts_at AS "startsAt",
-      ends_at AS "endsAt",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
+  let previousImageKey = "";
+  let savedAd = null;
+  const requestedId = String(payload?.id || "").trim();
 
-  if (currentAd?.imageKey && currentAd.imageKey !== ad.imageKey) {
-    await deleteStoredImage(currentAd.imageKey);
+  await updateSiteContent((content) => {
+    const index = content.ads.findIndex((ad) => ad.id === requestedId);
+    const current = index >= 0 ? serializeAd(content.ads[index]) : null;
+    const normalized = normalizeAdPayload({
+      ...payload,
+      id: requestedId || undefined,
+      createdAt: current?.createdAt || payload?.createdAt,
+      impressions: current?.impressions ?? payload?.impressions,
+      clicks: current?.clicks ?? payload?.clicks,
+    });
+    previousImageKey = current?.imageKey || "";
+    savedAd = serializeAd(normalized);
+
+    if (index >= 0) content.ads[index] = savedAd;
+    else content.ads.push(savedAd);
+    return content;
+  });
+
+  if (previousImageKey && previousImageKey !== savedAd.imageKey) {
+    await deleteStoredImage(previousImageKey);
   }
-
-  const serialized = serializeAd(ad);
-  await refreshPublicDataCacheBestEffort();
-  return serialized;
+  return savedAd;
 }
 
 export async function deleteAd(id) {
-  await ensureContentSchema();
-  const [ad] = await db()`
-    DELETE FROM site_ads
-    WHERE id = ${String(id)}
-    RETURNING
-      id,
-      title,
-      description,
-      image_url AS "imageUrl",
-      image_key AS "imageKey",
-      image_width AS "imageWidth",
-      image_height AS "imageHeight",
-      image_content_type AS "imageContentType",
-      image_size AS "imageSize",
-      link_url AS "linkUrl",
-      button_label AS "buttonLabel",
-      placement,
-      section,
-      active,
-      impressions,
-      clicks,
-      sort_order AS "sortOrder",
-      starts_at AS "startsAt",
-      ends_at AS "endsAt",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
-  if (ad?.imageKey) {
-    await deleteStoredImage(ad.imageKey);
-  }
-  await refreshPublicDataCacheBestEffort();
-  return ad ? serializeAd(ad) : null;
+  let deleted = null;
+  await updateSiteContent((content) => {
+    const index = content.ads.findIndex((ad) => ad.id === String(id));
+    if (index >= 0) deleted = serializeAd(content.ads.splice(index, 1)[0]);
+    return content;
+  });
+  if (deleted?.imageKey) await deleteStoredImage(deleted.imageKey);
+  return deleted;
 }
 
 export async function updateAdStats(id, field) {
-  await ensureContentSchema();
-  if (field !== "clicks") {
-    throw new Error("Invalid stats field.");
-  }
+  if (field !== "clicks") throw new Error("Invalid stats field.");
 
-  const updatedAt = new Date();
-  const [ad] = await db()`
-    UPDATE site_ads
-    SET clicks = clicks + 1, updated_at = ${updatedAt}
-    WHERE id = ${String(id)}
-      AND link_url IS NOT NULL
-      AND link_url <> ''
-    RETURNING
-      id,
-      title,
-      description,
-      image_url AS "imageUrl",
-      image_key AS "imageKey",
-      image_width AS "imageWidth",
-      image_height AS "imageHeight",
-      image_content_type AS "imageContentType",
-      image_size AS "imageSize",
-      link_url AS "linkUrl",
-      button_label AS "buttonLabel",
-      placement,
-      section,
-      active,
-      impressions,
-      clicks,
-      sort_order AS "sortOrder",
-      starts_at AS "startsAt",
-      ends_at AS "endsAt",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
+  let updated = null;
+  await updateSiteContent((content) => {
+    const index = content.ads.findIndex((ad) => ad.id === String(id));
+    if (index < 0) return content;
 
-  return ad ? serializeAd(ad) : null;
-}
-
-async function queryPublicProgramsFromDb() {
-  await ensureContentSchema();
-  const programs = await db()`
-    SELECT
-      id,
-      day_id AS "dayId",
-      day_label AS "dayLabel",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      program,
-      host,
-      logo_url AS "logoUrl",
-      logo_key AS "logoKey",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-    FROM station_programs
-    WHERE active = TRUE
-    ORDER BY day_id ASC, sort_order ASC, start_time ASC
-  `;
-  const serialized = programs.map(serializeProgram).sort(sortPrograms);
-  if (!serialized.length) {
-    const fallbackPrograms = defaultProgramRows().map(serializeProgram).sort(sortPrograms);
-    return {
-      programs: fallbackPrograms,
-      days: programsToScheduleDays(fallbackPrograms),
-      currentProgram: currentProgramFromPrograms(fallbackPrograms),
+    const current = serializeAd(content.ads[index]);
+    if (!current.linkUrl) return content;
+    updated = {
+      ...current,
+      clicks: current.clicks + 1,
+      updatedAt: new Date().toISOString(),
     };
-  }
-
-  return {
-    programs: serialized,
-    days: programsToScheduleDays(serialized),
-    currentProgram: currentProgramFromPrograms(serialized),
-  };
-}
-
-function programsFromPublicCache(cache) {
-  if (!Array.isArray(cache?.programs)) return null;
-
-  const serialized = cache.programs.map(serializeProgram).sort(sortPrograms);
-  return {
-    programs: serialized,
-    days: programsToScheduleDays(serialized),
-    currentProgram: currentProgramFromPrograms(serialized),
-  };
+    content.ads[index] = updated;
+    return content;
+  });
+  return updated;
 }
 
 export async function listPublicPrograms() {
-  const cached = programsFromPublicCache(await readPublicDataCache());
-  if (cached) return cached;
-
-  const programsData = await queryPublicProgramsFromDb();
-  const currentCache = await readPublicDataCache();
-  await writePublicDataCache({
-    ads: Array.isArray(currentCache?.ads) ? currentCache.ads : [],
-    settings: currentCache?.settings ? serializeSettings(currentCache.settings) : serializeSettings(null),
-    programs: programsData.programs,
-    djs: Array.isArray(currentCache?.djs) ? currentCache.djs : [],
-  });
-  return programsData;
-}
-
-async function queryPublicDjsFromDb() {
-  try {
-    await ensureContentSchema();
-    const djs = await db()`
-      SELECT
-        id,
-        signatures,
-        dj_name AS "djName",
-        program_name AS "programName",
-        active,
-        sort_order AS "sortOrder",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM station_djs
-      WHERE active = TRUE
-      ORDER BY sort_order ASC, updated_at DESC
-      LIMIT ${MAX_DJS}
-    `;
-    return djs.map(serializeDj);
-  } catch {
-    return [];
-  }
-}
-
-function djsFromPublicCache(cache) {
-  if (!Array.isArray(cache?.djs)) return null;
-  return cache.djs.map(serializeDj).slice(0, MAX_DJS);
+  return programsData((await readSiteContent()).programs, { publicOnly: true });
 }
 
 export async function listPublicDjs() {
-  const directCached = await readPublicDjsCache();
-  if (directCached) return directCached;
-
-  const cached = djsFromPublicCache(await readPublicDataCache());
-  if (cached) {
-    await writePublicDjsCache(cached);
-    return cached;
-  }
-
-  const djs = await queryPublicDjsFromDb();
-  await writePublicDjsCache(djs);
-  return djs;
+  return (await readSiteContent()).djs
+    .filter((dj) => dj.active)
+    .map(serializeDj)
+    .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
+    .slice(0, MAX_DJS);
 }
 
 function defaultLiveStatus() {
   return serializeLiveStatus({ state: "off" });
 }
 
-let liveStatusTableReady = false;
-
-async function ensureLiveStatusTable() {
-  if (liveStatusTableReady) return;
-
-  await db()`
-    CREATE TABLE IF NOT EXISTS live_status_simulation (
-      id TEXT PRIMARY KEY DEFAULT 'global',
-      state TEXT NOT NULL DEFAULT 'off',
-      dj_name TEXT NOT NULL DEFAULT 'DJ Leo',
-      program_name TEXT NOT NULL DEFAULT 'Roots Strike',
-      listeners INTEGER NOT NULL DEFAULT 2,
-      visitors INTEGER NOT NULL DEFAULT 49823,
-      movement_percent INTEGER NOT NULL DEFAULT 32,
-      live_boost_percent INTEGER NOT NULL DEFAULT 65,
-      growth_percent INTEGER NOT NULL DEFAULT 12,
-      seed INTEGER NOT NULL DEFAULT 731,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      config JSONB
-    )
-  `;
-
-  await db()`ALTER TABLE live_status_simulation ADD COLUMN IF NOT EXISTS config JSONB`;
-
-  await db()`
-    INSERT INTO live_status_simulation (id)
-    VALUES ('global')
-    ON CONFLICT (id) DO NOTHING
-  `;
-
-  liveStatusTableReady = true;
-}
-
 export async function getLiveStatusTest(options = {}) {
-  const { ensureTable = true, useCache = false, cacheOnly = false } = options;
-  if (useCache || cacheOnly) {
+  const { useCache = false, cacheOnly = false } = options;
+  if (useCache && !cacheOnly) {
     const cached = await readLiveStatusCache();
     if (cached) return cached;
   }
-  if (cacheOnly) return defaultLiveStatus();
 
-  if (ensureTable) {
-    await ensureLiveStatusTable();
-  }
-
-  try {
-    const rows = await db()`
-      SELECT
-        state,
-        dj_name AS "djName",
-        program_name AS "programName",
-        listeners,
-        visitors,
-        movement_percent AS "movementPercent",
-        live_boost_percent AS "liveBoostPercent",
-        growth_percent AS "growthPercent",
-        seed,
-        updated_at AS "updatedAt",
-        config
-      FROM live_status_simulation
-      WHERE id = 'global'
-      LIMIT 1
-    `;
-
-    const liveStatusTest = rows[0] ? serializeLiveStatus(rows[0]) : defaultLiveStatus();
-    if (useCache) await writeLiveStatusCache(liveStatusTest);
-    return liveStatusTest;
-  } catch (error) {
-    if (!ensureTable) {
-      const fallback = defaultLiveStatus();
-      if (useCache) await writeLiveStatusCache(fallback);
-      return fallback;
-    }
-    throw error;
-  }
-}
-
-export async function saveLiveStatusTest(payload) {
-  await ensureLiveStatusTable();
-
-  const normalized = normalizeLiveStatusPayload(payload);
-  const legacyListeners = Math.round(((normalized.listenersMin ?? normalized.listeners) + (normalized.listenersMax ?? normalized.listeners)) / 2);
-  const normalizedConfig = JSON.stringify({
-    ...normalized,
-    appliedAt: iso(normalized.appliedAt) || new Date().toISOString(),
-    updatedAt: iso(normalized.updatedAt) || new Date().toISOString(),
-  });
-  const [row] = await db()`
-    INSERT INTO live_status_simulation (
-      id,
-      state,
-      dj_name,
-      program_name,
-      listeners,
-      visitors,
-      movement_percent,
-      live_boost_percent,
-      growth_percent,
-      seed,
-      updated_at,
-      config
-    )
-    VALUES (
-      'global',
-      ${normalized.state},
-      ${normalized.djName},
-      ${normalized.programName},
-      ${legacyListeners},
-      ${normalized.visitorBase},
-      ${normalized.movementPercent},
-      ${normalized.liveBoostPercent},
-      ${normalized.visitorGrowthPercent},
-      ${normalized.seed},
-      ${normalized.updatedAt},
-      ${normalizedConfig}::jsonb
-    )
-    ON CONFLICT (id) DO UPDATE SET
-      state = EXCLUDED.state,
-      dj_name = EXCLUDED.dj_name,
-      program_name = EXCLUDED.program_name,
-      listeners = EXCLUDED.listeners,
-      visitors = EXCLUDED.visitors,
-      movement_percent = EXCLUDED.movement_percent,
-      live_boost_percent = EXCLUDED.live_boost_percent,
-      growth_percent = EXCLUDED.growth_percent,
-      seed = EXCLUDED.seed,
-      updated_at = EXCLUDED.updated_at,
-      config = EXCLUDED.config
-    RETURNING
-      state,
-      dj_name AS "djName",
-      program_name AS "programName",
-      listeners,
-      visitors,
-      movement_percent AS "movementPercent",
-      live_boost_percent AS "liveBoostPercent",
-      growth_percent AS "growthPercent",
-      seed,
-      updated_at AS "updatedAt",
-      config
-  `;
-  const liveStatusTest = serializeLiveStatus(row);
-  await writeLiveStatusCache(liveStatusTest);
+  const liveStatusTest = serializeLiveStatus((await readSiteContent({ forceRefresh: cacheOnly })).liveStatusTest);
+  if (useCache) await writeLiveStatusCache(liveStatusTest);
   return liveStatusTest;
 }
 
-export async function listAdminPrograms() {
-  await ensureDefaultPrograms();
-  const programs = await db()`
-    SELECT
-      id,
-      day_id AS "dayId",
-      day_label AS "dayLabel",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      program,
-      host,
-      logo_url AS "logoUrl",
-      logo_key AS "logoKey",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-    FROM station_programs
-    ORDER BY day_id ASC, sort_order ASC, start_time ASC
-  `;
-  const serialized = programs.map(serializeProgram).sort(sortPrograms);
+export async function saveLiveStatusTest(payload) {
+  const normalized = serializeLiveStatus(normalizeLiveStatusPayload(payload));
+  await updateSiteContent((content) => ({ ...content, liveStatusTest: normalized }));
+  return normalized;
+}
 
-  return {
-    programs: serialized,
-    days: programsToScheduleDays(serialized),
-    currentProgram: currentProgramFromPrograms(serialized),
-  };
+export async function listAdminPrograms() {
+  return programsData((await readSiteContent()).programs);
 }
 
 export async function listAdminDjs() {
-  try {
-    await ensureContentSchema();
-    const djs = await db()`
-      SELECT
-        id,
-        signatures,
-        dj_name AS "djName",
-        program_name AS "programName",
-        active,
-        sort_order AS "sortOrder",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM station_djs
-      ORDER BY sort_order ASC, updated_at DESC
-      LIMIT ${MAX_DJS}
-    `;
-    return djs.map(serializeDj);
-  } catch {
-    return [];
-  }
+  return (await readSiteContent()).djs
+    .map(serializeDj)
+    .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
+    .slice(0, MAX_DJS);
 }
 
 export async function saveDj(payload) {
-  await ensureContentSchema();
-  const normalized = normalizeDjPayload(payload);
-  if (!normalized.djName) throw new Error("Informe o nome público do DJ.");
-  if (!normalized.programName) throw new Error("Informe o nome do programa ao vivo.");
-
-  const [dj] = await db()`
-    INSERT INTO station_djs (
-      id,
-      signatures,
-      dj_name,
-      program_name,
-      active,
-      sort_order,
-      created_at,
-      updated_at
-    )
-    VALUES (
-      ${normalized.id},
-      ${normalized.signatures},
-      ${normalized.djName},
-      ${normalized.programName},
-      ${normalized.active},
-      ${normalized.sortOrder},
-      ${normalized.createdAt},
-      ${normalized.updatedAt}
-    )
-    ON CONFLICT (id) DO UPDATE SET
-      signatures = EXCLUDED.signatures,
-      dj_name = EXCLUDED.dj_name,
-      program_name = EXCLUDED.program_name,
-      active = EXCLUDED.active,
-      sort_order = EXCLUDED.sort_order,
-      updated_at = EXCLUDED.updated_at
-    RETURNING
-      id,
-      signatures,
-      dj_name AS "djName",
-      program_name AS "programName",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
-
-  const serialized = serializeDj(dj);
-  await refreshPublicDataCacheBestEffort();
-  return serialized;
+  let savedDj = null;
+  const requestedId = String(payload?.id || "").trim();
+  await updateSiteContent((content) => {
+    const index = content.djs.findIndex((dj) => dj.id === requestedId);
+    const current = index >= 0 ? serializeDj(content.djs[index]) : null;
+    const normalized = normalizeDjPayload({
+      ...payload,
+      id: requestedId || undefined,
+      createdAt: current?.createdAt || payload?.createdAt,
+    });
+    if (!normalized.djName) throw new Error("Informe o nome público do DJ.");
+    if (!normalized.programName) throw new Error("Informe o nome do programa ao vivo.");
+    savedDj = serializeDj(normalized);
+    if (index >= 0) content.djs[index] = savedDj;
+    else content.djs.push(savedDj);
+    return content;
+  });
+  return savedDj;
 }
 
 export async function deleteDj(id) {
-  await ensureContentSchema();
-  const [dj] = await db()`
-    DELETE FROM station_djs
-    WHERE id = ${String(id)}
-    RETURNING
-      id,
-      signatures,
-      dj_name AS "djName",
-      program_name AS "programName",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
-
-  await refreshPublicDataCacheBestEffort();
-  return dj ? serializeDj(dj) : null;
+  let deleted = null;
+  await updateSiteContent((content) => {
+    const index = content.djs.findIndex((dj) => dj.id === String(id));
+    if (index >= 0) deleted = serializeDj(content.djs.splice(index, 1)[0]);
+    return content;
+  });
+  return deleted;
 }
 
 export async function saveProgram(payload) {
-  await ensureContentSchema();
-  const normalized = normalizeProgramPayload(payload);
-  if (!normalized.program) throw new Error("Informe o nome do programa.");
-
-  const database = db();
-  const [currentProgram] = await database`
-    SELECT logo_key AS "logoKey"
-    FROM station_programs
-    WHERE id = ${normalized.id}
-    LIMIT 1
-  `;
-  const [program] = await database`
-    INSERT INTO station_programs (
-      id,
-      day_id,
-      day_label,
-      start_time,
-      end_time,
-      program,
-      host,
-      logo_url,
-      logo_key,
-      active,
-      sort_order,
-      created_at,
-      updated_at
-    )
-    VALUES (
-      ${normalized.id},
-      ${normalized.dayId},
-      ${normalized.dayLabel},
-      ${normalized.startTime},
-      ${normalized.endTime},
-      ${normalized.program},
-      ${normalized.host},
-      ${normalized.logoUrl},
-      ${normalized.logoKey},
-      ${normalized.active},
-      ${normalized.sortOrder},
-      ${normalized.createdAt},
-      ${normalized.updatedAt}
-    )
-    ON CONFLICT (id) DO UPDATE SET
-      day_id = EXCLUDED.day_id,
-      day_label = EXCLUDED.day_label,
-      start_time = EXCLUDED.start_time,
-      end_time = EXCLUDED.end_time,
-      program = EXCLUDED.program,
-      host = EXCLUDED.host,
-      logo_url = EXCLUDED.logo_url,
-      logo_key = EXCLUDED.logo_key,
-      active = EXCLUDED.active,
-      sort_order = EXCLUDED.sort_order,
-      updated_at = EXCLUDED.updated_at
-    RETURNING
-      id,
-      day_id AS "dayId",
-      day_label AS "dayLabel",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      program,
-      host,
-      logo_url AS "logoUrl",
-      logo_key AS "logoKey",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
-
-  if (currentProgram?.logoKey && currentProgram.logoKey !== program.logoKey) {
-    await deleteStoredImage(currentProgram.logoKey);
+  let previousLogoKey = "";
+  let savedProgram = null;
+  const requestedId = String(payload?.id || "").trim();
+  await updateSiteContent((content) => {
+    const index = content.programs.findIndex((program) => program.id === requestedId);
+    const current = index >= 0 ? serializeProgram(content.programs[index]) : null;
+    const normalized = normalizeProgramPayload({
+      ...payload,
+      id: requestedId || undefined,
+      createdAt: current?.createdAt || payload?.createdAt,
+    });
+    if (!normalized.program) throw new Error("Informe o nome do programa.");
+    previousLogoKey = current?.logoKey || "";
+    savedProgram = serializeProgram(normalized);
+    if (index >= 0) content.programs[index] = savedProgram;
+    else content.programs.push(savedProgram);
+    return content;
+  });
+  if (previousLogoKey && previousLogoKey !== savedProgram.logoKey) {
+    await deleteStoredImage(previousLogoKey);
   }
-
-  const serialized = serializeProgram(program);
-  await refreshPublicDataCacheBestEffort();
-  return serialized;
+  return savedProgram;
 }
 
 export async function deleteProgram(id) {
-  await ensureContentSchema();
-  const [program] = await db()`
-    DELETE FROM station_programs
-    WHERE id = ${String(id)}
-    RETURNING
-      id,
-      day_id AS "dayId",
-      day_label AS "dayLabel",
-      start_time AS "startTime",
-      end_time AS "endTime",
-      program,
-      host,
-      logo_url AS "logoUrl",
-      logo_key AS "logoKey",
-      active,
-      sort_order AS "sortOrder",
-      created_at AS "createdAt",
-      updated_at AS "updatedAt"
-  `;
-  if (program?.logoKey) {
-    await deleteStoredImage(program.logoKey);
-  }
-
-  await refreshPublicDataCacheBestEffort();
-  return program ? serializeProgram(program) : null;
+  let deleted = null;
+  await updateSiteContent((content) => {
+    const index = content.programs.findIndex((program) => program.id === String(id));
+    if (index >= 0) deleted = serializeProgram(content.programs.splice(index, 1)[0]);
+    return content;
+  });
+  if (deleted?.logoKey) await deleteStoredImage(deleted.logoKey);
+  return deleted;
 }
 
 export async function saveAdImage(payload) {
@@ -1747,36 +1119,6 @@ export function isAdminRequest(event) {
   const authorization = event.headers?.authorization || event.headers?.Authorization || "";
   const [, token = ""] = authorization.match(/^Bearer\s+(.+)$/i) || [];
   return Boolean(token && ADMIN_TOKEN) && constantTimeTextEqual(token, ADMIN_TOKEN);
-}
-
-async function ensureDefaultPrograms() {
-  await ensureContentSchema();
-  await db()`
-    INSERT INTO station_programs (id, day_id, day_label, start_time, end_time, program, host, sort_order)
-    VALUES
-      ('sun-madrugada', 'Sun', 'Domingo', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('sun-manha', 'Sun', 'Domingo', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('sun-tarde-noite', 'Sun', 'Domingo', '12:00', '23:59', 'Domingo Roots', 'Web Rádio Conexão Jamaica', 3),
-      ('mon-madrugada', 'Mon', 'Segunda', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('mon-manha', 'Mon', 'Segunda', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('mon-tarde-noite', 'Mon', 'Segunda', '12:00', '23:59', 'Reggae em todas as vertentes', 'Web Rádio Conexão Jamaica', 3),
-      ('tue-madrugada', 'Tue', 'Terça', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('tue-manha', 'Tue', 'Terça', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('tue-tarde-noite', 'Tue', 'Terça', '12:00', '23:59', 'Reggae em todas as vertentes', 'Web Rádio Conexão Jamaica', 3),
-      ('wed-madrugada', 'Wed', 'Quarta', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('wed-manha', 'Wed', 'Quarta', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('wed-tarde-noite', 'Wed', 'Quarta', '12:00', '23:59', 'Reggae em todas as vertentes', 'Web Rádio Conexão Jamaica', 3),
-      ('thu-madrugada', 'Thu', 'Quinta', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('thu-manha', 'Thu', 'Quinta', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('thu-tarde-noite', 'Thu', 'Quinta', '12:00', '23:59', 'Reggae em todas as vertentes', 'Web Rádio Conexão Jamaica', 3),
-      ('fri-madrugada', 'Fri', 'Sexta', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('fri-manha', 'Fri', 'Sexta', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('fri-tarde-noite', 'Fri', 'Sexta', '12:00', '23:59', 'Reggae em todas as vertentes', 'Web Rádio Conexão Jamaica', 3),
-      ('sat-madrugada', 'Sat', 'Sábado', '00:00', '04:59', 'Madrugada Reggae', 'Web Rádio Conexão Jamaica', 1),
-      ('sat-manha', 'Sat', 'Sábado', '05:00', '11:59', 'Conexão Jamaica Manhã', 'Web Rádio Conexão Jamaica', 2),
-      ('sat-tarde-noite', 'Sat', 'Sábado', '12:00', '23:59', 'Sábado Reggae Vibes', 'Web Rádio Conexão Jamaica', 3)
-    ON CONFLICT (id) DO NOTHING
-  `;
 }
 
 function defaultProgramRows() {

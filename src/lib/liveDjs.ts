@@ -19,7 +19,7 @@ export type StationDj = {
   updatedAt: string;
 };
 
-export type DjsSource = "database" | "local" | "fallback";
+export type DjsSource = "blobs" | "local" | "fallback";
 
 export type DjsPayload = {
   djs: StationDj[];
@@ -35,7 +35,7 @@ export type LiveStatusResolvedMetrics = {
   visitors: number;
 };
 
-export type LiveStatusTestSource = "database" | "local" | "fallback";
+export type LiveStatusTestSource = "blobs" | "local" | "fallback";
 
 export type LiveStatusTestResponse = {
   liveStatusTest: LiveStatusTestPayload;
@@ -154,7 +154,7 @@ export async function fetchAdminDjs(token: string, signal?: AbortSignal): Promis
     signal,
     headers: authHeaders(token),
   });
-  return hydrateDjsPayload(payload, "database");
+  return hydrateDjsPayload(payload, "blobs");
 }
 
 export async function saveRemoteDj(token: string, dj: StationDj) {
@@ -180,7 +180,7 @@ export async function fetchLiveStatusTest(signal?: AbortSignal): Promise<LiveSta
     const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", { signal });
     return {
       liveStatusTest: normalizeLiveStatusTest(payload.liveStatusTest || { state: "off" }),
-      source: payload.source === "database" ? "database" : "fallback",
+      source: payload.source === "blobs" ? "blobs" : "fallback",
       fetchedAt: payload.fetchedAt || new Date().toISOString(),
       message: payload.message,
     };
@@ -343,7 +343,7 @@ export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLive
 function hydrateDjsPayload(payload: ApiDjsPayload, fallbackSource: DjsSource): DjsPayload {
   return {
     djs: (payload.djs || []).map(normalizeDj).sort(sortDjs),
-    source: payload.source === "database" ? "database" : fallbackSource,
+    source: payload.source === "blobs" ? "blobs" : fallbackSource,
     fetchedAt: payload.fetchedAt || new Date().toISOString(),
     message: payload.message,
   };

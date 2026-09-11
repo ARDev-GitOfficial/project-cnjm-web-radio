@@ -212,7 +212,7 @@ export function AdsAdminPage() {
       try {
         return await fetchAdminAds(session.token, signal);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Banco global indisponível.";
+        const message = error instanceof Error ? error.message : "Conteúdo global indisponível.";
         return canUseLocalFallback() ? localAdminPayload(message) : unavailableAdsPayload(message);
       }
     },
@@ -235,7 +235,7 @@ export function AdsAdminPage() {
       try {
         return await fetchAdminPrograms(session.token, signal);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Banco global indisponível.";
+        const message = error instanceof Error ? error.message : "Conteúdo global indisponível.";
         return canUseLocalFallback() ? localProgramPayload(message) : localProgramPayload(message);
       }
     },
@@ -258,7 +258,7 @@ export function AdsAdminPage() {
       try {
         return await fetchAdminDjs(session.token, signal);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Banco global indisponível.";
+        const message = error instanceof Error ? error.message : "Conteúdo global indisponível.";
         return canUseLocalFallback() ? localDjPayload(message) : localDjPayload(message);
       }
     },
@@ -291,19 +291,19 @@ export function AdsAdminPage() {
   const programs = programData?.programs ?? loadPrograms();
   const currentProgram = programData?.currentProgram;
   const djs = djData?.djs ?? loadDjs();
-  const isRemote = Boolean(session && data?.source === "database");
+  const isRemote = Boolean(session && data?.source === "blobs");
   const isLocalMode = Boolean(session && data?.source === "local");
   const isDisconnected = Boolean(session && data?.source === "fallback");
-  const canManageLiveMetrics = Boolean(session && (session.source === "database" || canUseLocalFallback()));
-  const isLiveMetricsRemote = Boolean(session?.source === "database");
+  const canManageLiveMetrics = Boolean(session && (session.source === "blobs" || canUseLocalFallback()));
+  const isLiveMetricsRemote = Boolean(session?.source === "blobs");
   const canEditAds = isRemote || isLocalMode;
   const liveMetricsScopeText = isLiveMetricsRemote
     ? "Ajuste os ouvintes e as visitas exibidas no site publicado. Nada muda para o público antes de aplicar."
-    : "Ajuste os ouvintes e as visitas do teste local, sem salvar nada no banco global.";
+    : "Ajuste os ouvintes e as visitas do teste local, sem salvar nada no conteúdo global.";
   const environmentNotice = isLocalMode
     ? "Ambiente local ativo para testes. Os anúncios salvos aqui ficam apenas neste navegador."
     : isDisconnected
-      ? data?.message || "Banco global de anúncios não conectado. Ative a API, o banco e o storage no Netlify."
+      ? data?.message || "Conteúdo global de anúncios não conectado. Ative a API e o Netlify Blobs."
       : "";
   const activeCount = useMemo(() => ads.filter((ad) => ad.active).length, [ads]);
   const webpMigrationAds = useMemo(() => ads.filter(needsWebpMigration), [ads]);
@@ -387,7 +387,7 @@ export function AdsAdminPage() {
     try {
       const nextSession = await loginAdsAdmin(loginForm.login, loginForm.password);
       setSession(nextSession);
-      setActionMessage(nextSession.source === "database" ? "Banco conectado." : "Modo local ativo para testes.");
+      setActionMessage(nextSession.source === "blobs" ? "Blobs conectados." : "Modo local ativo para testes.");
     } catch (error) {
       setLoginError(error instanceof Error ? error.message : "Login ou senha inválidos.");
     }
@@ -434,7 +434,7 @@ export function AdsAdminPage() {
     setActionMessage("");
 
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de alterar a configuração de anúncios.");
+      setActionMessage("Conecte o conteúdo global antes de alterar a configuração de anúncios.");
       return;
     }
 
@@ -485,7 +485,7 @@ export function AdsAdminPage() {
     event.preventDefault();
     const normalized = normalizeAd({ ...draft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de salvar anúncios.");
+      setActionMessage("Conecte o conteúdo global antes de salvar anúncios.");
       return;
     }
     if (!normalized.title && !normalized.description && !normalized.imageUrl) {
@@ -513,7 +513,7 @@ export function AdsAdminPage() {
 
   const removeAd = async (id: string) => {
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de excluir anúncios.");
+      setActionMessage("Conecte o conteúdo global antes de excluir anúncios.");
       return;
     }
 
@@ -533,7 +533,7 @@ export function AdsAdminPage() {
 
   const toggleAd = async (ad: SiteAd) => {
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de ativar ou desativar anúncios.");
+      setActionMessage("Conecte o conteúdo global antes de ativar ou desativar anúncios.");
       return;
     }
 
@@ -557,7 +557,7 @@ export function AdsAdminPage() {
     if (!file) return;
 
     if (!canEditAds) {
-      setUploadState({ status: "error", message: "Conecte o banco global antes de enviar imagens." });
+      setUploadState({ status: "error", message: "Conecte o conteúdo global antes de enviar imagens." });
       return;
     }
 
@@ -572,7 +572,7 @@ export function AdsAdminPage() {
 
   const applyCroppedAdImage = async (image: CroppedAdImage) => {
     if (!canEditAds) {
-      setUploadState({ status: "error", message: "Conecte o banco global antes de enviar imagens." });
+      setUploadState({ status: "error", message: "Conecte o conteúdo global antes de enviar imagens." });
       return;
     }
 
@@ -628,7 +628,7 @@ export function AdsAdminPage() {
     if (!canEditAds) {
       setConversionState({
         status: "error",
-        message: "Conecte o banco global antes de converter anúncios.",
+        message: "Conecte o conteúdo global antes de converter anúncios.",
         done: 0,
         total: pendingAds.length,
       });
@@ -706,7 +706,7 @@ export function AdsAdminPage() {
     event.preventDefault();
     const normalized = normalizeProgram({ ...programDraft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de salvar a programação.");
+      setActionMessage("Conecte o conteúdo global antes de salvar a programação.");
       return;
     }
     if (!normalized.program) {
@@ -736,7 +736,7 @@ export function AdsAdminPage() {
 
   const removeProgram = async (id: string) => {
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de excluir programas.");
+      setActionMessage("Conecte o conteúdo global antes de excluir programas.");
       return;
     }
 
@@ -836,7 +836,7 @@ export function AdsAdminPage() {
     event.preventDefault();
     const normalized = normalizeDj({ ...djDraft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de salvar DJs.");
+      setActionMessage("Conecte o conteúdo global antes de salvar DJs.");
       return;
     }
     if (!normalized.djName || !normalized.programName) {
@@ -871,7 +871,7 @@ export function AdsAdminPage() {
 
   const removeDj = async (id: string) => {
     if (!canEditAds) {
-      setActionMessage("Conecte o banco global antes de excluir DJs.");
+      setActionMessage("Conecte o conteúdo global antes de excluir DJs.");
       return;
     }
 
@@ -910,7 +910,7 @@ export function AdsAdminPage() {
 
   const persistAudienceConfig = async (next: LiveStatusTestPayload, successMessage: string) => {
     if (!canManageLiveMetrics || !session) {
-      setActionMessage("Conecte o banco global antes de alterar a audiência.");
+      setActionMessage("Conecte o conteúdo global antes de alterar a audiência.");
       return;
     }
 
@@ -919,7 +919,7 @@ export function AdsAdminPage() {
     setIsAudienceSaving(true);
 
     try {
-      const saved = session.source === "database"
+      const saved = session.source === "blobs"
         ? await saveRemoteLiveStatusTest(session.token, next)
         : next;
       writeLiveStatusTest(saved);
@@ -931,7 +931,7 @@ export function AdsAdminPage() {
         ["live-status-admin", session.token, session.source],
         (current) => ({
           liveStatusTest: normalized,
-          source: session.source === "database" ? "database" : "local",
+          source: session.source === "blobs" ? "blobs" : "local",
           fetchedAt: new Date().toISOString(),
           message: current?.message,
         }),
@@ -1137,7 +1137,7 @@ export function AdsAdminPage() {
 
   const toggleManualLiveDjNow = async (dj?: StationDj) => {
     if (!canManageLiveMetrics) {
-      setActionMessage("Conecte o banco global antes de alterar a audiência.");
+      setActionMessage("Conecte o conteúdo global antes de alterar a audiência.");
       return;
     }
 
@@ -1184,7 +1184,7 @@ export function AdsAdminPage() {
 
   const applyAudienceDraft = async () => {
     if (!canManageLiveMetrics) {
-      setActionMessage("Conecte o banco global antes de alterar a audiência.");
+      setActionMessage("Conecte o conteúdo global antes de alterar a audiência.");
       return;
     }
 
@@ -1208,7 +1208,7 @@ export function AdsAdminPage() {
 
     await persistAudienceConfig(
       next,
-      session?.source === "database"
+      session?.source === "blobs"
         ? "Audiência aplicada no site publicado."
         : "Audiência aplicada no teste local.",
     );
@@ -1282,7 +1282,7 @@ export function AdsAdminPage() {
         <div className="admin-top-actions">
           <span className={isRemote ? "source-pill is-remote" : isLocalMode ? "source-pill is-local" : "source-pill is-offline"}>
             {isRemote ? <Database size={15} /> : isLocalMode ? <HardDrive size={15} /> : <AlertTriangle size={15} />}
-            {isRemote ? "Banco global" : isLocalMode ? "Modo local" : "Banco pendente"}
+            {isRemote ? "Blobs globais" : isLocalMode ? "Modo local" : "Blobs pendentes"}
           </span>
           <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus}>
             <RefreshCw size={16} /> Atualizar
@@ -1966,7 +1966,7 @@ export function AdsAdminPage() {
         <article>
           <span>Arquivos</span>
           <strong>Blobs</strong>
-          <p>Em produção, o WebP vai para storage e o banco guarda só os metadados.</p>
+          <p>Em produção, imagens WebP e cadastros ficam no armazenamento global.</p>
         </article>
         <article>
           <span>Entrega</span>
@@ -1986,7 +1986,7 @@ export function AdsAdminPage() {
           <strong>{webpMigrationAds.length ? `${webpMigrationAds.length} imagem(ns) antiga(s) em PNG` : "Anúncios otimizados em WebP"}</strong>
           <span>
             {webpMigrationAds.length
-              ? "Converta os anúncios cadastrados no banco para WebP e libere os blobs antigos quando o registro for salvo."
+              ? "Converta os anúncios cadastrados para WebP e libere os arquivos antigos quando o registro for salvo."
               : "Novos uploads já saem em WebP 1700 x 450px."}
           </span>
           {conversionState.message ? (

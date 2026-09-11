@@ -37,7 +37,7 @@ export async function fetchSchedule(signal?: AbortSignal) {
     const programs = await fetchPrograms(signal);
     return {
       ok: programs.source !== "fallback",
-      source: programs.source === "database" ? "live" : "fallback",
+      source: programs.source === "blobs" ? "live" : "fallback",
       days: programs.days,
       fetchedAt: programs.fetchedAt,
       message: programs.message,

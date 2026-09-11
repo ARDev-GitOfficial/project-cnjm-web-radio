@@ -16,7 +16,7 @@ export type StationProgram = {
   updatedAt: string;
 };
 
-export type ProgramsSource = "database" | "local" | "fallback";
+export type ProgramsSource = "blobs" | "local" | "fallback";
 
 export type ProgramsPayload = {
   programs: StationProgram[];
@@ -185,7 +185,7 @@ export function currentProgramFromPrograms(programs: StationProgram[], now = new
 export async function fetchPrograms(signal?: AbortSignal): Promise<ProgramsPayload> {
   try {
     const payload = await requestJson<ApiProgramPayload>(API_BASE, { signal });
-    if (payload.ok && payload.source === "database") return hydrateProgramsPayload(payload, "database");
+    if (payload.ok && payload.source === "blobs") return hydrateProgramsPayload(payload, "blobs");
     return localProgramsPayload(payload.message);
   } catch (error) {
     const message = error instanceof Error ? error.message : undefined;
@@ -198,7 +198,7 @@ export async function fetchAdminPrograms(token: string, signal?: AbortSignal): P
     signal,
     headers: authHeaders(token),
   });
-  return hydrateProgramsPayload(payload, "database");
+  return hydrateProgramsPayload(payload, "blobs");
 }
 
 export async function saveRemoteProgram(token: string, program: StationProgram) {
@@ -284,7 +284,7 @@ function hydrateProgramsPayload(payload: ApiProgramPayload, fallbackSource: Prog
     programs,
     days,
     currentProgram: payload.currentProgram ? normalizeProgram(payload.currentProgram) : currentProgramFromPrograms(programs),
-    source: payload.source === "database" ? "database" : fallbackSource,
+    source: payload.source === "blobs" ? "blobs" : fallbackSource,
     fetchedAt: payload.fetchedAt || new Date().toISOString(),
     message: payload.message,
   };

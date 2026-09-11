@@ -838,7 +838,7 @@ async function handleAds(event, pathname) {
         const data = await listPublicAds();
         return json(200, {
           ok: true,
-          source: "database",
+          source: "blobs",
           ...data,
           fetchedAt: new Date().toISOString(),
         }, publicAdsCacheHeaders);
@@ -849,7 +849,7 @@ async function handleAds(event, pathname) {
           ads: [],
           settings: fallbackAdSettings(),
           fetchedAt: new Date().toISOString(),
-          message: error instanceof Error && error.message ? error.message : "Banco de anúncios indisponível.",
+          message: error instanceof Error && error.message ? error.message : "Conteúdo de anúncios indisponível.",
         }, publicAdsCacheHeaders);
       }
     }
@@ -877,7 +877,7 @@ async function handleAds(event, pathname) {
       const data = await listAdminAds();
       return json(200, {
         ok: true,
-        source: "database",
+        source: "blobs",
         ...data,
         fetchedAt: new Date().toISOString(),
       });
@@ -979,7 +979,7 @@ async function handlePrograms(event, pathname) {
         const data = await listPublicPrograms();
         return json(200, {
           ok: true,
-          source: "database",
+          source: "blobs",
           ...data,
           fetchedAt: new Date().toISOString(),
         }, publicProgramsCacheHeaders);
@@ -1019,7 +1019,7 @@ async function handlePrograms(event, pathname) {
       const data = await listAdminPrograms();
       return json(200, {
         ok: true,
-        source: "database",
+        source: "blobs",
         ...data,
         fetchedAt: new Date().toISOString(),
       });
@@ -1079,7 +1079,7 @@ async function handleDjs(event, pathname) {
         const djs = await listAdminDjs();
         return json(200, {
           ok: true,
-          source: "database",
+          source: "blobs",
           djs,
           fetchedAt: new Date().toISOString(),
         });
@@ -1139,7 +1139,7 @@ async function handleLiveStatusTest(event, pathname) {
         : await getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true });
       return json(200, {
         ok: true,
-        source: "database",
+        source: "blobs",
         liveStatusTest,
         fetchedAt: new Date().toISOString(),
       }, adminMode ? {} : liveStatusCacheHeaders);
@@ -1162,7 +1162,7 @@ async function handleLiveStatusTest(event, pathname) {
       const liveStatusTest = await saveLiveStatusTest(payload.liveStatusTest ?? payload);
       return json(200, {
         ok: true,
-        source: "database",
+        source: "blobs",
         liveStatusTest,
         fetchedAt: new Date().toISOString(),
       });

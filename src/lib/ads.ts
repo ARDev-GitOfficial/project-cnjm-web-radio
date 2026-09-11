@@ -1,5 +1,5 @@
 export type AdPlacement = "commercial" | "program";
-export type AdsSource = "database" | "local" | "fallback";
+export type AdsSource = "blobs" | "local" | "fallback";
 
 export type SiteAd = {
   id: string;
@@ -294,7 +294,7 @@ export async function sendAdStat(id: string, field: "clicks") {
 export async function fetchPublicAds(signal?: AbortSignal): Promise<AdsPayload> {
   try {
     const payload = await requestJson<ApiPayload>(API_BASE, { signal });
-    if (payload.ok && payload.source === "database") return hydratePayload(payload, "database");
+    if (payload.ok && payload.source === "blobs") return hydratePayload(payload, "blobs");
     if (payload.ads?.length) return hydratePayload(payload, "fallback");
     return canUseLocalFallback() ? localAdsPayload(payload.message) : unavailableAdsPayload(payload.message);
   } catch (error) {
@@ -308,7 +308,7 @@ export async function fetchAdminAds(token: string, signal?: AbortSignal): Promis
     signal,
     headers: authHeaders(token),
   });
-  return hydratePayload(payload, "database");
+  return hydratePayload(payload, "blobs");
 }
 
 export async function loginAdsAdmin(login: string, password: string): Promise<AdminSession> {
@@ -326,7 +326,7 @@ export async function loginAdsAdmin(login: string, password: string): Promise<Ad
       const session: AdminSession = {
         token,
         login: String(payload.session?.login || login),
-        source: "database",
+        source: "blobs",
       };
       setAdminSession(session);
       return session;
@@ -412,7 +412,7 @@ export function unavailableAdsPayload(message?: string): AdsPayload {
     settings: defaultAdSettings(),
     source: "fallback",
     fetchedAt: new Date().toISOString(),
-    message: message || "Banco global de anúncios não conectado neste ambiente.",
+    message: message || "Conteúdo global de anúncios não conectado neste ambiente.",
   };
 }
 
@@ -435,9 +435,9 @@ export function getAdminSession(): AdminSession | null {
   }
 
   try {
-    const parsed = JSON.parse(raw) as Partial<AdminSession>;
+    const parsed = JSON.parse(raw) as Partial<Omit<AdminSession, "source">> & { source?: string };
     if (!parsed.token) return null;
-    const source = parsed.source === "database" ? "database" : "local";
+    const source = parsed.source === "blobs" || parsed.source === "database" ? "blobs" : "local";
     if (source === "local" && !canUseLocalFallback()) {
       window.localStorage.removeItem(AD_SESSION_KEY);
       return null;
@@ -530,7 +530,7 @@ export function notifyAdsUpdated() {
 }
 
 function hydratePayload(payload: ApiPayload, fallbackSource: AdsSource): AdsPayload {
-  const source = payload.source === "database" ? "database" : fallbackSource;
+  const source = payload.source === "blobs" ? "blobs" : fallbackSource;
 
   return {
     ads: (payload.ads || []).map(normalizeAd).sort(sortAds).slice(0, MAX_ADS),

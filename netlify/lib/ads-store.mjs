@@ -60,9 +60,93 @@ const DAY_LABELS = {
 let publicDataMemoryCache = null;
 let publicDjsMemoryCache = null;
 let liveStatusMemoryCache = null;
+let contentSchemaReady = false;
+let contentSchemaPromise = null;
 
 function db() {
   return getDatabase().sql;
+}
+
+async function ensureContentSchema() {
+  if (contentSchemaReady) return;
+  if (contentSchemaPromise) return contentSchemaPromise;
+
+  contentSchemaPromise = (async () => {
+    const database = db();
+
+    await database`
+      CREATE TABLE IF NOT EXISTS site_ads (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        image_url TEXT NOT NULL DEFAULT '',
+        image_key TEXT NOT NULL DEFAULT '',
+        image_width INTEGER,
+        image_height INTEGER,
+        image_content_type TEXT,
+        image_size INTEGER,
+        link_url TEXT NOT NULL DEFAULT '',
+        button_label TEXT NOT NULL DEFAULT 'Abrir anuncio',
+        placement TEXT NOT NULL DEFAULT 'banner',
+        section TEXT NOT NULL DEFAULT 'Principal',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        impressions INTEGER NOT NULL DEFAULT 0,
+        clicks INTEGER NOT NULL DEFAULT 0,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        starts_at TIMESTAMPTZ,
+        ends_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await database`
+      CREATE TABLE IF NOT EXISTS ad_settings (
+        id TEXT PRIMARY KEY DEFAULT 'global',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        start_time TEXT NOT NULL DEFAULT '08:00',
+        end_time TEXT NOT NULL DEFAULT '22:00',
+        commercial_runs INTEGER NOT NULL DEFAULT 3,
+        program_runs INTEGER NOT NULL DEFAULT 1,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await database`
+      CREATE TABLE IF NOT EXISTS station_programs (
+        id TEXT PRIMARY KEY,
+        day_id TEXT NOT NULL DEFAULT 'Mon',
+        day_label TEXT NOT NULL DEFAULT 'Segunda',
+        start_time TEXT NOT NULL DEFAULT '00:00',
+        end_time TEXT NOT NULL DEFAULT '23:59',
+        program TEXT NOT NULL DEFAULT '',
+        host TEXT NOT NULL DEFAULT 'Web Radio Conexao Jamaica',
+        logo_url TEXT NOT NULL DEFAULT '',
+        logo_key TEXT NOT NULL DEFAULT '',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    await database`
+      CREATE TABLE IF NOT EXISTS station_djs (
+        id TEXT PRIMARY KEY,
+        signatures TEXT NOT NULL DEFAULT '',
+        dj_name TEXT NOT NULL DEFAULT '',
+        program_name TEXT NOT NULL DEFAULT '',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    contentSchemaReady = true;
+  })().finally(() => {
+    contentSchemaPromise = null;
+  });
+
+  return contentSchemaPromise;
 }
 
 function firstEnv(keys) {
@@ -568,10 +652,10 @@ export function resolveLiveStatusMetrics(payload, nowMs = Date.now(), liveDj = n
   const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
     ? test.visitorTarget
     : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
-  const visitorGrowthMinutes = Math.max(35, 520 - profile.visitorGrowthPercent * 4.6);
+  const visitorGrowthMinutes = 4 + (1 - profile.visitorGrowthPercent / 100) * 24;
   const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
   const rampFromVisitors = normalizeRunCount(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
-  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement);
+  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement) * visitorProgress;
   const visitors = normalizeRunCount(
     (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
     visitorBase,
@@ -663,6 +747,7 @@ function normalizeDjSignatures(value) {
 }
 
 async function queryPublicAdsFromDb() {
+  await ensureContentSchema();
   const database = db();
   const now = new Date();
   const [settings, ads] = await Promise.all([
@@ -770,6 +855,7 @@ export async function listPublicAds() {
 }
 
 export async function listAdminAds() {
+  await ensureContentSchema();
   const database = db();
   const [settings, ads] = await Promise.all([
     getAdSettings(),
@@ -809,6 +895,7 @@ export async function listAdminAds() {
 }
 
 export async function getAdSettings() {
+  await ensureContentSchema();
   const database = db();
   const rows = await database`
     SELECT
@@ -842,6 +929,7 @@ export async function getAdSettings() {
 }
 
 export async function saveAdSettings(payload) {
+  await ensureContentSchema();
   const normalized = normalizeSettingsPayload(payload);
   const [settings] = await db()`
     INSERT INTO ad_settings (
@@ -887,6 +975,7 @@ export async function saveAdSettings(payload) {
 }
 
 export async function saveAd(payload) {
+  await ensureContentSchema();
   const normalized = normalizeAdPayload(payload);
   const database = db();
   const [currentAd] = await database`
@@ -994,6 +1083,7 @@ export async function saveAd(payload) {
 }
 
 export async function deleteAd(id) {
+  await ensureContentSchema();
   const [ad] = await db()`
     DELETE FROM site_ads
     WHERE id = ${String(id)}
@@ -1028,6 +1118,7 @@ export async function deleteAd(id) {
 }
 
 export async function updateAdStats(id, field) {
+  await ensureContentSchema();
   if (field !== "clicks") {
     throw new Error("Invalid stats field.");
   }
@@ -1067,6 +1158,7 @@ export async function updateAdStats(id, field) {
 }
 
 async function queryPublicProgramsFromDb() {
+  await ensureContentSchema();
   const programs = await db()`
     SELECT
       id,
@@ -1131,6 +1223,7 @@ export async function listPublicPrograms() {
 
 async function queryPublicDjsFromDb() {
   try {
+    await ensureContentSchema();
     const djs = await db()`
       SELECT
         id,
@@ -1353,6 +1446,7 @@ export async function listAdminPrograms() {
 
 export async function listAdminDjs() {
   try {
+    await ensureContentSchema();
     const djs = await db()`
       SELECT
         id,
@@ -1374,6 +1468,7 @@ export async function listAdminDjs() {
 }
 
 export async function saveDj(payload) {
+  await ensureContentSchema();
   const normalized = normalizeDjPayload(payload);
   if (!normalized.djName) throw new Error("Informe o nome público do DJ.");
   if (!normalized.programName) throw new Error("Informe o nome do programa ao vivo.");
@@ -1423,6 +1518,7 @@ export async function saveDj(payload) {
 }
 
 export async function deleteDj(id) {
+  await ensureContentSchema();
   const [dj] = await db()`
     DELETE FROM station_djs
     WHERE id = ${String(id)}
@@ -1442,6 +1538,7 @@ export async function deleteDj(id) {
 }
 
 export async function saveProgram(payload) {
+  await ensureContentSchema();
   const normalized = normalizeProgramPayload(payload);
   if (!normalized.program) throw new Error("Informe o nome do programa.");
 
@@ -1521,6 +1618,7 @@ export async function saveProgram(payload) {
 }
 
 export async function deleteProgram(id) {
+  await ensureContentSchema();
   const [program] = await db()`
     DELETE FROM station_programs
     WHERE id = ${String(id)}
@@ -1652,6 +1750,7 @@ export function isAdminRequest(event) {
 }
 
 async function ensureDefaultPrograms() {
+  await ensureContentSchema();
   await db()`
     INSERT INTO station_programs (id, day_id, day_label, start_time, end_time, program, host, sort_order)
     VALUES
@@ -1807,9 +1906,26 @@ function matchingDjAudienceProfile(profiles, liveDj) {
 function matchingScheduleAudienceProfile(profiles, nowMs) {
   const parts = saoPauloTimeParts(nowMs);
   return profiles.find((profile) => {
-    if (!profile.enabled || !profile.dayIds.includes(parts.dayId)) return false;
-    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(profile.startTime), timeToMinutes(profile.endTime));
+    return profile.enabled && isAudienceScheduleActive(profile.dayIds, profile.startTime, profile.endTime, parts);
   }) || null;
+}
+
+function isAudienceScheduleActive(dayIds, startTime, endTime, parts) {
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+
+  if (start < end) {
+    return dayIds.includes(parts.dayId) && isMinuteWithinWindow(parts.minuteOfDay, start, end);
+  }
+
+  if (parts.minuteOfDay >= start) return dayIds.includes(parts.dayId);
+  if (parts.minuteOfDay <= end) return dayIds.includes(previousAudienceDay(parts.dayId));
+  return false;
+}
+
+function previousAudienceDay(dayId) {
+  const index = AUDIENCE_DAY_IDS.indexOf(dayId);
+  return AUDIENCE_DAY_IDS[(index + AUDIENCE_DAY_IDS.length - 1) % AUDIENCE_DAY_IDS.length] || "Sun";
 }
 
 function easedProgress(elapsedMinutes, durationMinutes) {
@@ -1820,7 +1936,7 @@ function easedProgress(elapsedMinutes, durationMinutes) {
 
 function transitionMinutes(percent) {
   const speed = Math.max(0, Math.min(100, percent)) / 100;
-  return 95 - speed * 86;
+  return 2 + (1 - speed) * 18;
 }
 
 function comparableAudienceText(value) {
@@ -1967,9 +2083,9 @@ function normalizeManualLiveDjSchedules(value) {
 function matchingManualLiveDjSchedule(schedules, nowMs) {
   const parts = saoPauloTimeParts(nowMs);
   return schedules.find((schedule) => {
-    if (!schedule.enabled || !schedule.dayIds.includes(parts.dayId)) return false;
+    if (!schedule.enabled || !isAudienceScheduleActive(schedule.dayIds, schedule.startTime, schedule.endTime, parts)) return false;
     if (!schedule.djName.trim() && !schedule.programName.trim()) return false;
-    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(schedule.startTime), timeToMinutes(schedule.endTime));
+    return true;
   }) || null;
 }
 

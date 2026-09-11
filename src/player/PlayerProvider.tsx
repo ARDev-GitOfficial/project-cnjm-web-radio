@@ -39,8 +39,8 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
-const NOW_PLAYING_REFRESH_MS = 240_000;
-const LIVE_STATUS_REFRESH_MS = 15_000;
+const NOW_PLAYING_REFRESH_MS = 120_000;
+const LIVE_STATUS_REFRESH_MS = 60_000;
 const LOCAL_SIMULATION_REFRESH_MS = 5_000;
 
 type BrowserAudioContext = typeof AudioContext;

@@ -3,6 +3,9 @@ dist/
 .netlify/
 .vite/
 coverage/
+.env
+.env.*
+!.env.example
 *.log
 *.tsbuildinfo
 vite.config.js

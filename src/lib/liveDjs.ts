@@ -285,10 +285,10 @@ export function resolveLiveStatusTestMetrics(
   const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
     ? test.visitorTarget
     : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
-  const visitorGrowthMinutes = Math.max(35, 520 - profile.visitorGrowthPercent * 4.6);
+  const visitorGrowthMinutes = 4 + (1 - profile.visitorGrowthPercent / 100) * 24;
   const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
   const rampFromVisitors = normalizeWholeNumber(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
-  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement);
+  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement) * visitorProgress;
   const visitors = normalizeWholeNumber(
     (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
     visitorBase,
@@ -596,9 +596,9 @@ function normalizeManualLiveDjSchedules(value: unknown): ManualLiveDjSchedule[] 
 function matchingManualLiveDjSchedule(schedules: ManualLiveDjSchedule[], nowMs: number) {
   const parts = saoPauloTimeParts(nowMs);
   return schedules.find((schedule) => {
-    if (!schedule.enabled || !schedule.dayIds.includes(parts.dayId)) return false;
+    if (!schedule.enabled || !isAudienceScheduleActive(schedule.dayIds, schedule.startTime, schedule.endTime, parts)) return false;
     if (!schedule.djName.trim() && !schedule.programName.trim()) return false;
-    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(schedule.startTime), timeToMinutes(schedule.endTime));
+    return true;
   }) || null;
 }
 
@@ -692,9 +692,31 @@ function matchingDjAudienceProfile(profiles: AudienceDjProfile[], liveDj?: LiveD
 function matchingScheduleAudienceProfile(profiles: AudienceScheduleProfile[], nowMs: number) {
   const parts = saoPauloTimeParts(nowMs);
   return profiles.find((profile) => {
-    if (!profile.enabled || !profile.dayIds.includes(parts.dayId)) return false;
-    return isMinuteWithinWindow(parts.minuteOfDay, timeToMinutes(profile.startTime), timeToMinutes(profile.endTime));
+    return profile.enabled && isAudienceScheduleActive(profile.dayIds, profile.startTime, profile.endTime, parts);
   }) || null;
+}
+
+function isAudienceScheduleActive(
+  dayIds: string[],
+  startTime: string,
+  endTime: string,
+  parts: { dayId: string; minuteOfDay: number },
+) {
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+
+  if (start < end) {
+    return dayIds.includes(parts.dayId) && isMinuteWithinWindow(parts.minuteOfDay, start, end);
+  }
+
+  if (parts.minuteOfDay >= start) return dayIds.includes(parts.dayId);
+  if (parts.minuteOfDay <= end) return dayIds.includes(previousAudienceDay(parts.dayId));
+  return false;
+}
+
+function previousAudienceDay(dayId: string) {
+  const index = AUDIENCE_DAY_IDS.indexOf(dayId as (typeof AUDIENCE_DAY_IDS)[number]);
+  return AUDIENCE_DAY_IDS[(index + AUDIENCE_DAY_IDS.length - 1) % AUDIENCE_DAY_IDS.length] || "Sun";
 }
 
 function easedProgress(elapsedMinutes: number, durationMinutes: number) {
@@ -705,7 +727,7 @@ function easedProgress(elapsedMinutes: number, durationMinutes: number) {
 
 function transitionMinutes(percent: number) {
   const speed = Math.max(0, Math.min(100, percent)) / 100;
-  return 95 - speed * 86;
+  return 2 + (1 - speed) * 18;
 }
 
 function normalizeNullableWholeNumber(value: unknown, min: number, max: number) {

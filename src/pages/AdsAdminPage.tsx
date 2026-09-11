@@ -29,7 +29,7 @@ import {
   UploadCloud,
   UsersRound,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Navigate, NavLink, useLocation } from "react-router-dom";
 import { AdImageCropper, type CroppedAdImage } from "../components/AdImageCropper";
 import {
@@ -109,6 +109,7 @@ import {
   writeLiveStatusTest,
   type DjsPayload,
   type LiveStatusTestPayload,
+  type LiveStatusTestResponse,
   type StationDj,
 } from "../lib/liveDjs";
 import type { AudienceDjProfile, AudienceScheduleProfile, ManualLiveDjControl, ManualLiveDjSchedule } from "../types";
@@ -144,6 +145,8 @@ const adminPanelRoutes: Record<AdminPanel, string> = {
   djs: "/ads/djs",
   visits: "/ads/visitas",
 };
+
+const ADMIN_QUERY_STALE_TIME_MS = 120_000;
 
 const localAdminPayload = (message?: string): AdsPayload => ({
   ads: loadAds(),
@@ -193,6 +196,8 @@ export function AdsAdminPage() {
   const [liveTest, setLiveTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [audienceDraft, setAudienceDraft] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [simulationNow, setSimulationNow] = useState(() => Date.now());
+  const audienceSaveInFlightRef = useRef(false);
+  const [isAudienceSaving, setIsAudienceSaving] = useState(false);
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
     enabled: Boolean(session),
@@ -211,6 +216,10 @@ export function AdsAdminPage() {
         return canUseLocalFallback() ? localAdminPayload(message) : unavailableAdsPayload(message);
       }
     },
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   });
   const { data: programData, isFetching: isFetchingPrograms } = useQuery({
     queryKey: ["programs-admin", session?.token, session?.source],
@@ -230,6 +239,10 @@ export function AdsAdminPage() {
         return canUseLocalFallback() ? localProgramPayload(message) : localProgramPayload(message);
       }
     },
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   });
   const { data: djData, isFetching: isFetchingDjs } = useQuery({
     queryKey: ["djs-admin", session?.token, session?.source],
@@ -249,6 +262,10 @@ export function AdsAdminPage() {
         return canUseLocalFallback() ? localDjPayload(message) : localDjPayload(message);
       }
     },
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   });
   const { data: liveStatusData, isFetching: isFetchingLiveStatus } = useQuery({
     queryKey: ["live-status-admin", session?.token, session?.source],
@@ -263,6 +280,10 @@ export function AdsAdminPage() {
 
       return fetchLiveStatusTest(signal);
     },
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   });
 
   const ads = data?.ads ?? [];
@@ -893,6 +914,10 @@ export function AdsAdminPage() {
       return;
     }
 
+    if (audienceSaveInFlightRef.current) return;
+    audienceSaveInFlightRef.current = true;
+    setIsAudienceSaving(true);
+
     try {
       const saved = session.source === "database"
         ? await saveRemoteLiveStatusTest(session.token, next)
@@ -902,10 +927,21 @@ export function AdsAdminPage() {
       setLiveTest(normalized);
       setAudienceDraft(normalized);
       setSimulationNow(Date.now());
+      queryClient.setQueryData<LiveStatusTestResponse>(
+        ["live-status-admin", session.token, session.source],
+        (current) => ({
+          liveStatusTest: normalized,
+          source: session.source === "database" ? "database" : "local",
+          fetchedAt: new Date().toISOString(),
+          message: current?.message,
+        }),
+      );
       setActionMessage(successMessage);
-      refresh();
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar a audiência.");
+    } finally {
+      audienceSaveInFlightRef.current = false;
+      setIsAudienceSaving(false);
     }
   };
 
@@ -1531,8 +1567,8 @@ export function AdsAdminPage() {
               </div>
 
               <div className="audience-control-actions">
-                <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics}>
-                  <Save size={16} /> {isLiveMetricsRemote ? "Aplicar no site" : "Aplicar no local"}
+                <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
+                  <Save size={16} /> {isAudienceSaving ? "Aplicando..." : isLiveMetricsRemote ? "Aplicar no site" : "Aplicar no local"}
                 </button>
                 <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
                   <RefreshCw size={16} /> Descartar rascunho
@@ -1587,7 +1623,7 @@ export function AdsAdminPage() {
                 onClick={() => {
                   void toggleManualLiveDjNow();
                 }}
-                disabled={!canManageLiveMetrics}
+                disabled={!canManageLiveMetrics || isAudienceSaving}
               >
                 <Power size={16} /> {liveDjControl.active ? "Desligar ao vivo" : "Ativar agora"}
               </button>
@@ -1731,7 +1767,7 @@ export function AdsAdminPage() {
             )}
 
             <div className="audience-control-actions">
-              <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics}>
+              <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
                 <Save size={16} /> Aplicar agenda e regras
               </button>
               <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
@@ -2512,7 +2548,7 @@ export function AdsAdminPage() {
                           onClick={() => {
                             void toggleManualLiveDjNow(dj);
                           }}
-                          disabled={!canManageLiveMetrics || !dj.djName || !dj.programName}
+                          disabled={!canManageLiveMetrics || isAudienceSaving || !dj.djName || !dj.programName}
                         >
                           <Radio size={15} /> {isManualLive ? "Desligar manual" : "Ativar manualmente"}
                         </button>

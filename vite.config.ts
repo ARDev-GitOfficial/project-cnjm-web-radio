@@ -1,13 +1,14 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } from "vite";
+import { defineConfig, loadEnv, type Plugin, type PreviewServer, type ViteDevServer } from "vite";
 
-const STATS_URL = "https://s03.svrdedicado.org:7586/stats?sid=1&json=1";
 const STATISTICS_URL = "https://s03.svrdedicado.org:7586/statistics?json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
 const PUBLIC_SCHEDULE_URL = "https://webradioconexaojamaica.com/api/schedule";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
-const COVER_URL = "https://player.svrdedicado.org/one-page/7586/cover";
 const CHAT_MESSAGES_URL = "https://player.svrdedicado.org/chat/7586/lista?limit=80";
+const STREAM_METADATA_URL = loadEnv("development", process.cwd(), "").CNJM_STREAM_METADATA_URL
+  || process.env.CNJM_STREAM_METADATA_URL
+  || "";
 
 type ResponseLike = {
   statusCode: number;
@@ -105,11 +106,7 @@ function normalizeStreamStatsPayload(payload: StatsPayload) {
 }
 
 async function fetchStreamStats() {
-  try {
-    return normalizeStreamStatsPayload(await fetchJson<StatsPayload>(STATISTICS_URL));
-  } catch {
-    return normalizeStreamStatsPayload(await fetchJson<StatsPayload>(STATS_URL));
-  }
+  return normalizeStreamStatsPayload(await fetchJson<StatsPayload>(STATISTICS_URL));
 }
 
 function decodeHtml(value: string) {
@@ -177,28 +174,6 @@ function isSafeCoverUrl(candidate: string) {
   }
 }
 
-async function fetchCoverUrl() {
-  try {
-    const response = await fetch(COVER_URL, {
-      headers: {
-        "User-Agent": "CNJMRadioSite/0.1",
-        Accept: "image/avif,image/webp,image/png,image/jpeg,text/plain,*/*;q=0.8",
-      },
-    });
-    if (!response.ok) return null;
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.startsWith("image/") && isSafeCoverUrl(response.url)) {
-      return response.url;
-    }
-
-    const candidate = normalizePublicText(await response.text());
-    return isSafeCoverUrl(candidate) ? candidate : null;
-  } catch {
-    return null;
-  }
-}
-
 function parseTrack(rawValue: string) {
   const raw = decodeHtml(rawValue || "Web Rádio Conexão Jamaica - Reggae ao vivo");
   const parts = raw.split(/\s(?:-|–|—|\||\/)\s/).map((part) => part.trim()).filter(Boolean);
@@ -218,23 +193,47 @@ function parseTrack(rawValue: string) {
   };
 }
 
-function parseSafeTrack(rawValue: string) {
-  return isTechnicalTrack(rawValue) ? parseTrack(SAFE_NOW_PLAYING) : parseTrack(rawValue);
+function parseSourceTrack(rawValue: string) {
+  const raw = normalizePublicText(rawValue) || SAFE_NOW_PLAYING;
+  const parts = raw.split(/\s(?:-|–|—|\||\/)\s/).map(normalizePublicText).filter(Boolean);
+
+  if (parts.length >= 2) {
+    return { artist: parts[0], title: parts.slice(1).join(" - "), raw, album: null };
+  }
+
+  return { artist: "Web Rádio Conexão Jamaica", title: raw, raw, album: null };
 }
 
-function safeHistoryFallback() {
-  const track = parseTrack(SAFE_NOW_PLAYING);
+function xmlValue(xml: string, tagName: string) {
+  const expression = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  return normalizePublicText(String(xml).match(expression)?.[1] ?? "");
+}
 
-  return [
-    {
-      id: "history-safe-programming",
-      time: "agora",
-      title: track.title,
-      artist: track.artist,
-      raw: track.raw,
-      isCurrent: true,
+async function fetchServerMetadata() {
+  if (!STREAM_METADATA_URL) throw new Error("CNJM_STREAM_METADATA_URL não configurada.");
+
+  const xml = await fetchText(STREAM_METADATA_URL);
+  const listenerCount = Number(xmlValue(xml, "ouvintes_conectados"));
+  const status = xmlValue(xml, "status");
+  const stats: StatsPayload = {
+    currentlisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
+    peaklisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
+    uniquelisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
+    streamhits: 0,
+    servergenre: xmlValue(xml, "genero") || "Reggae",
+    bitrate: xmlValue(xml, "plano_bitrate") || "128",
+    streamstatus: /^(?:ligado|online|on)$/i.test(status) ? 1 : 0,
+    streamuptime: 0,
+    streamsource: "",
+  };
+
+  return {
+    stats,
+    track: {
+      ...parseSourceTrack(xmlValue(xml, "musica_atual")),
+      coverUrl: isSafeCoverUrl(xmlValue(xml, "capa_musica")) ? xmlValue(xml, "capa_musica") : null,
     },
-  ];
+  };
 }
 
 function parseCells(rowHtml: string) {
@@ -374,16 +373,7 @@ function parseChatMessages(html: string) {
 
 async function handleNowPlaying(res: ResponseLike) {
   try {
-    const [stats, historyHtml, coverUrl] = await Promise.all([
-      fetchStreamStats(),
-      fetchText(HISTORY_URL),
-      fetchCoverUrl(),
-    ]);
-    const track = {
-      ...parseSafeTrack(stats.songtitle ?? ""),
-      coverUrl,
-    };
-    const history = parseHistory(historyHtml);
+    const { stats, track } = await fetchServerMetadata();
     const isOnline = Number(stats.streamstatus ?? 0) === 1;
 
     json(res, 200, {
@@ -410,40 +400,90 @@ async function handleNowPlaying(res: ResponseLike) {
         detectedValue: stats.streamsource ?? stats.source ?? null,
         source: "autodj",
       },
-      history: history.length > 0 ? history : safeHistoryFallback(),
+      history: [],
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch {
+    try {
+      const stats = await fetchStreamStats();
+      const track = { ...parseSourceTrack(stats.songtitle ?? ""), coverUrl: null };
+      const isOnline = Number(stats.streamstatus ?? 0) === 1;
+
+      json(res, 200, {
+        ok: true,
+        source: "fallback",
+        track,
+        stats: {
+          listeners: Number(stats.currentlisteners ?? 0),
+          peakListeners: Number(stats.peaklisteners ?? 0),
+          uniqueListeners: Number(stats.uniquelisteners ?? 0),
+          streamHits: Number(stats.streamhits ?? 0),
+          genre: stats.servergenre ?? "Reggae",
+          bitrate: stats.bitrate ?? "128",
+          isOnline,
+          uptimeSeconds: Number(stats.streamuptime ?? 0) || null,
+          streamSource: stats.streamsource ?? stats.source ?? null,
+        },
+        liveDj: {
+          state: isOnline ? "online" : "offline",
+          isLive: false,
+          djName: null,
+          programName: null,
+          matchedSignature: null,
+          detectedValue: stats.streamsource ?? stats.source ?? null,
+          source: "autodj",
+        },
+        history: [],
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch {
+      json(res, 200, {
+        ok: false,
+        source: "fallback",
+        track: { ...parseSourceTrack(""), coverUrl: null },
+        stats: {
+          listeners: 0,
+          peakListeners: 0,
+          uniqueListeners: 0,
+          streamHits: 0,
+          genre: "Reggae",
+          bitrate: "128",
+          isOnline: false,
+          uptimeSeconds: null,
+          streamSource: null,
+        },
+        liveDj: {
+          state: "offline",
+          isLive: false,
+          djName: null,
+          programName: null,
+          matchedSignature: null,
+          detectedValue: null,
+          source: "fallback",
+        },
+        history: [],
+        fetchedAt: new Date().toISOString(),
+        message: "Dados ao vivo indisponíveis no momento.",
+      });
+    }
+  }
+}
+
+async function handleRecentTracks(res: ResponseLike) {
+  try {
+    json(res, 200, {
+      ok: true,
+      source: "live",
+      history: parseHistory(await fetchText(HISTORY_URL)),
       fetchedAt: new Date().toISOString(),
     });
   } catch {
     json(res, 200, {
       ok: false,
       source: "fallback",
-      track: {
-        ...parseTrack(SAFE_NOW_PLAYING),
-        coverUrl: null,
-      },
-      stats: {
-        listeners: 0,
-        peakListeners: 0,
-        uniqueListeners: 0,
-        streamHits: 0,
-        genre: "Reggae",
-        bitrate: "128",
-        isOnline: true,
-        uptimeSeconds: null,
-        streamSource: null,
-      },
-      liveDj: {
-        state: "connecting",
-        isLive: false,
-        djName: null,
-        programName: null,
-        matchedSignature: null,
-        detectedValue: null,
-        source: "fallback",
-      },
-      history: safeHistoryFallback(),
+      history: [],
       fetchedAt: new Date().toISOString(),
-      message: "Dados ao vivo indisponíveis no momento.",
+      message: "Histórico indisponível no momento.",
     });
   }
 }
@@ -516,6 +556,10 @@ function installApi(server: ViteDevServer | PreviewServer) {
 
     if (pathname === "/api/now-playing") {
       void handleNowPlaying(res);
+      return;
+    }
+    if (pathname === "/api/recent-tracks") {
+      void handleRecentTracks(res);
       return;
     }
     if (pathname === "/api/schedule") {

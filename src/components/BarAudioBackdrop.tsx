@@ -12,8 +12,9 @@ function average(values: Uint8Array, start: number, end: number) {
   return total / Math.max(1, safeEnd - start) / 255;
 }
 
-const DESKTOP_CANVAS_PIXEL_BUDGET = 1_120_000;
-const TOUCH_CANVAS_PIXEL_BUDGET = 680_000;
+const CANVAS_PIXEL_BUDGET = 1_120_000;
+const FULL_RATE_FPS = 60;
+const FALLBACK_RATE_FPS = 30;
 
 export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -33,15 +34,10 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     let animationId: number | null = null;
     let resizeFrameId: number | null = null;
     let lastFrameTime = 0;
-    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const coarseQuery = window.matchMedia("(pointer: coarse)");
     let isHidden = document.hidden;
     let isCanvasVisible = true;
-    let isReducedMotion = motionQuery.matches;
-    let isCoarsePointer = coarseQuery.matches;
-    let targetFps = isReducedMotion ? 30 : 60;
+    let targetFps = FULL_RATE_FPS;
     let overloadFrames = 0;
-    let recoveryFrames = 0;
     let viewportWidth = 1;
     let viewportHeight = 1;
     let barGradient: CanvasGradient | null = null;
@@ -58,34 +54,14 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
 
     const targetFrameInterval = () => 1000 / targetFps;
 
-    const resetAdaptiveRate = () => {
-      targetFps = isReducedMotion ? 30 : 60;
-      overloadFrames = 0;
-      recoveryFrames = 0;
-    };
-
     const updateAdaptiveRate = (renderCost: number, deltaTime: number) => {
-      if (isReducedMotion) {
-        resetAdaptiveRate();
-        return;
-      }
+      if (targetFps !== FULL_RATE_FPS) return;
 
-      if (targetFps === 60) {
-        const isOverloaded = renderCost > 13 || deltaTime > 25;
-        overloadFrames = isOverloaded ? overloadFrames + 1 : Math.max(0, overloadFrames - 1);
-        if (overloadFrames >= 10) {
-          targetFps = 30;
-          overloadFrames = 0;
-          recoveryFrames = 0;
-        }
-        return;
-      }
-
-      recoveryFrames = renderCost < 10 ? recoveryFrames + 1 : 0;
-      if (recoveryFrames >= 120) {
-        targetFps = 60;
+      const isOverloaded = renderCost > 13 || deltaTime > 20;
+      overloadFrames = isOverloaded ? overloadFrames + 1 : Math.max(0, overloadFrames - 1);
+      if (overloadFrames >= 10) {
+        targetFps = FALLBACK_RATE_FPS;
         overloadFrames = 0;
-        recoveryFrames = 0;
       }
     };
 
@@ -93,11 +69,9 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       const rect = canvas.getBoundingClientRect();
       viewportWidth = Math.max(1, rect.width);
       viewportHeight = Math.max(1, rect.height);
-      const maxPixelRatio = isReducedMotion ? 1 : isCoarsePointer ? 1 : 1.1;
-      const pixelBudget = isCoarsePointer ? TOUCH_CANVAS_PIXEL_BUDGET : DESKTOP_CANVAS_PIXEL_BUDGET;
-      const areaRatio = Math.sqrt(pixelBudget / Math.max(1, viewportWidth * viewportHeight));
+      const areaRatio = Math.sqrt(CANVAS_PIXEL_BUDGET / Math.max(1, viewportWidth * viewportHeight));
       const minPixelRatio = viewportWidth > 2600 ? 0.48 : viewportWidth > 1800 ? 0.65 : 0.78;
-      const pixelRatio = Math.max(minPixelRatio, Math.min(window.devicePixelRatio || 1, maxPixelRatio, areaRatio));
+      const pixelRatio = Math.max(minPixelRatio, Math.min(window.devicePixelRatio || 1, 1.1, areaRatio));
       canvas.width = Math.max(1, Math.floor(viewportWidth * pixelRatio));
       canvas.height = Math.max(1, Math.floor(viewportHeight * pixelRatio));
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
@@ -113,40 +87,33 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       });
     };
 
-    const updateMotionPreferences = () => {
-      isReducedMotion = motionQuery.matches;
-      isCoarsePointer = coarseQuery.matches;
-      resetAdaptiveRate();
-      resize();
-    };
-
     const updateVisibility = () => {
       isHidden = document.hidden;
       lastFrameTime = performance.now();
-      if (!isHidden && isCanvasVisible) requestFrame();
+      if (!isHidden && isCanvasVisible && playingRef.current) requestFrame();
     };
 
     const requestFrame = () => {
-      if (animationId !== null || isHidden || !isCanvasVisible) return;
+      if (animationId !== null || isHidden || !isCanvasVisible || !playingRef.current) return;
       animationId = window.requestAnimationFrame(render);
     };
 
     const render = (time: number) => {
       animationId = null;
 
-      if (isHidden || !isCanvasVisible) {
+      if (isHidden || !isCanvasVisible || !playingRef.current) {
+        context.clearRect(0, 0, viewportWidth, viewportHeight);
         return;
       }
 
       const deltaTime = time - lastFrameTime;
       const frameInterval = targetFrameInterval();
-      if (deltaTime < frameInterval) {
+      if (deltaTime < frameInterval * 0.9) {
         requestFrame();
         return;
       }
-      lastFrameTime = time - (deltaTime % frameInterval);
+      lastFrameTime = time;
       const renderStart = performance.now();
-
       const width = viewportWidth;
       const height = viewportHeight;
       if (width <= 0 || height <= 0) {
@@ -182,9 +149,9 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       const kick = playingRef.current ? Math.min(1, bass * 0.82 + bassRise * 3.4) : 0.2;
       const guitar = playingRef.current ? Math.min(1, guitarRange * 0.76 + lowMid * 0.34 + guitarRise * 2.6) : 0.24;
       const beat = playingRef.current ? Math.min(1, kick * 0.62 + mid * 0.28 + high * 0.12) : 0.16;
-      const preferredPitch = isReducedMotion ? (width < 560 ? 24 : 26) : width < 560 ? 16 : width < 920 ? 18 : 20;
+      const preferredPitch = width < 560 ? 16 : width < 920 ? 18 : 20;
       const minBarWidth = width < 560 ? 4 : width < 920 ? 5 : 6;
-      const maxBars = isReducedMotion ? 32 : isCoarsePointer ? 38 : 48;
+      const maxBars = 48;
       const barCount = Math.max(20, Math.min(maxBars, Math.floor(width / preferredPitch)));
       if (easedBars.length !== barCount) easedBars = new Float32Array(barCount);
       const pitch = width / barCount;
@@ -233,11 +200,9 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
         );
         const isRising = target > easedBars[index];
         const regionalEnergy = sideWeight * kick + centerWeight * guitar;
-        const ease = isReducedMotion
-          ? 0.032
-          : playingRef.current
-            ? (isRising ? 0.084 + regionalEnergy * 0.055 : 0.096 + sideWeight * 0.02)
-            : 0.034;
+        const ease = playingRef.current
+          ? (isRising ? 0.084 + regionalEnergy * 0.055 : 0.096 + sideWeight * 0.02)
+          : 0.034;
         easedBars[index] += (target - easedBars[index]) * ease;
         const power = Math.max(0.08, easedBars[index]);
         const barHeight = Math.max(28, power * height * 0.48);
@@ -269,17 +234,15 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
     const observer = "IntersectionObserver" in window
       ? new IntersectionObserver(([entry]) => {
           isCanvasVisible = Boolean(entry?.isIntersecting);
-          if (isCanvasVisible) requestFrame();
+          if (isCanvasVisible && playingRef.current) requestFrame();
         }, { threshold: 0.04 })
       : null;
 
     observer?.observe(canvas);
     window.addEventListener("resize", requestResize, { passive: true });
     document.addEventListener("visibilitychange", updateVisibility);
-    motionQuery.addEventListener("change", updateMotionPreferences);
-    coarseQuery.addEventListener("change", updateMotionPreferences);
     lastFrameTime = performance.now();
-    requestFrame();
+    if (isPlaying) requestFrame();
 
     return () => {
       if (animationId !== null) window.cancelAnimationFrame(animationId);
@@ -287,10 +250,8 @@ export function BarAudioBackdrop({ analyser, isPlaying }: BarAudioBackdropProps)
       observer?.disconnect();
       window.removeEventListener("resize", requestResize);
       document.removeEventListener("visibilitychange", updateVisibility);
-      motionQuery.removeEventListener("change", updateMotionPreferences);
-      coarseQuery.removeEventListener("change", updateMotionPreferences);
     };
-  }, []);
+  }, [isPlaying]);
 
   return <canvas ref={canvasRef} className="bar-backdrop" aria-hidden="true" />;
 }

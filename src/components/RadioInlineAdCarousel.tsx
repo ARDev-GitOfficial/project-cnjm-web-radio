@@ -70,9 +70,8 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
     const slide = scroller?.children[activeIndex] as HTMLElement | undefined;
     if (!slide) return;
 
-    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     slide.scrollIntoView({
-      behavior: prefersReducedMotion ? "auto" : "smooth",
+      behavior: "smooth",
       block: "nearest",
       inline: "center",
     });
@@ -88,8 +87,7 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
     if (radioAds.length <= 1) return undefined;
 
     const interval = window.setInterval(() => {
-      if (document.hidden) return;
-      if (Date.now() < pauseUntilRef.current) return;
+      if (document.hidden || Date.now() < pauseUntilRef.current) return;
       setActiveIndex((current) => (current + 1) % radioAds.length);
     }, AUTO_ROTATE_MS);
 
@@ -108,7 +106,6 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
         className="radio-inline-ad-viewport"
         onScroll={updateActiveFromScroll}
         onPointerDown={pauseAutoRotation}
-        onMouseEnter={pauseAutoRotation}
       >
         {radioAds.map((ad, index) => (
           <RadioInlineAd key={ad.id} ad={ad} isActive={index === activeIndex} />

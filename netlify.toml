@@ -11,6 +11,9 @@
 
 [functions]
   node_bundler = "esbuild"
+  # Sharp usa binários nativos; mantê-lo externo faz o Netlify levar o módulo
+  # completo para a função, em vez de tentar incorporá-lo ao arquivo gerado.
+  external_node_modules = ["sharp"]
 
 [[headers]]
   for = "/*"

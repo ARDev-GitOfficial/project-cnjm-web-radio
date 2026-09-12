@@ -44,6 +44,8 @@ type PlayerContextValue = {
 const PlayerContext = createContext<PlayerContextValue | null>(null);
 
 const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
+const STATION_NAME = "Web Rádio Conexão Jamaica";
+const DEFAULT_PAGE_TITLE = `${STATION_NAME} | Reggae ao vivo`;
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
 // A short public refresh catches scheduled DJ handoffs while the active-DJ response avoids metadata calls.
@@ -58,6 +60,78 @@ function getAudioContextConstructor(): BrowserAudioContext | null {
   };
 
   return window.AudioContext ?? win.webkitAudioContext ?? null;
+}
+
+function cleanMediaText(value: string | null | undefined) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function mediaSessionDetails(nowPlaying: NowPlayingResponse) {
+  const liveDj = nowPlaying.liveDj?.isLive ? nowPlaying.liveDj : null;
+  const title = cleanMediaText(liveDj?.programName || nowPlaying.track.title) || "Reggae ao vivo";
+  const artist = cleanMediaText(liveDj?.djName || nowPlaying.track.artist) || STATION_NAME;
+  const coverUrl = cleanMediaText(liveDj?.logoUrl || nowPlaying.track.coverUrl);
+  return { title, artist, coverUrl };
+}
+
+function absoluteMediaUrl(value: string) {
+  try {
+    return new URL(value, window.location.origin).href;
+  } catch {
+    return "";
+  }
+}
+
+function updateMediaSession(nowPlaying: NowPlayingResponse) {
+  if (typeof window === "undefined") return;
+
+  const { title, artist, coverUrl } = mediaSessionDetails(nowPlaying);
+  document.title = `${title} — ${artist} | ${STATION_NAME}`;
+
+  if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+
+  const stationArtwork = [
+    {
+      src: absoluteMediaUrl("/assets/cnjmradio-icon-192.webp"),
+      sizes: "192x192",
+      type: "image/webp",
+    },
+    {
+      src: absoluteMediaUrl("/assets/cnjmradio-icon-512.webp"),
+      sizes: "512x512",
+      type: "image/webp",
+    },
+  ];
+  const artwork = coverUrl
+    ? [{ src: absoluteMediaUrl(coverUrl), sizes: "512x512" }, ...stationArtwork]
+    : stationArtwork;
+
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title,
+      artist,
+      album: STATION_NAME,
+      artwork,
+    });
+  } catch {
+    // A identidade visual de reserva mantém a notificação útil quando uma capa externa é recusada.
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title,
+      artist,
+      album: STATION_NAME,
+      artwork: stationArtwork,
+    });
+  }
+}
+
+function setMediaSessionPlaybackState(state: MediaSessionPlaybackState) {
+  if (!("mediaSession" in navigator)) return;
+
+  try {
+    navigator.mediaSession.playbackState = state;
+  } catch {
+    // Some browsers expose metadata but do not expose playback state.
+  }
 }
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
@@ -114,6 +188,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (previous?.liveDj?.isLive) void refreshNowPlaying();
     return next;
   }, [refreshNowPlaying]);
+
+  useEffect(() => {
+    updateMediaSession(nowPlaying);
+  }, [
+    nowPlaying.liveDj?.djName,
+    nowPlaying.liveDj?.isLive,
+    nowPlaying.liveDj?.logoUrl,
+    nowPlaying.liveDj?.programName,
+    nowPlaying.track.artist,
+    nowPlaying.track.coverUrl,
+    nowPlaying.track.title,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      document.title = DEFAULT_PAGE_TITLE;
+    };
+  }, []);
 
   useEffect(() => {
     liveStatusTestRef.current = liveStatusTest;
@@ -228,14 +320,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setIsPlaying(true);
       setIsBuffering(false);
       setError(null);
+      setMediaSessionPlaybackState("playing");
     };
-    const handlePause = () => setIsPlaying(false);
+    const handlePause = () => {
+      setIsPlaying(false);
+      setMediaSessionPlaybackState("paused");
+    };
     const handleWaiting = () => setIsBuffering(true);
     const handleCanPlay = () => setIsBuffering(false);
     const handleError = () => {
       setIsPlaying(false);
       setIsBuffering(false);
       setError("Não foi possível tocar a transmissão agora.");
+      setMediaSessionPlaybackState("none");
     };
 
     audio.addEventListener("playing", handlePlaying);
@@ -355,6 +452,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     await play();
   }, [isPlaying, pause, play]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+
+    try {
+      navigator.mediaSession.setActionHandler("play", () => { void play(); });
+      navigator.mediaSession.setActionHandler("pause", pause);
+      navigator.mediaSession.setActionHandler("stop", pause);
+    } catch {
+      // Action buttons are optional; metadata still works in browsers without them.
+    }
+
+    return () => {
+      try {
+        navigator.mediaSession.setActionHandler("play", null);
+        navigator.mediaSession.setActionHandler("pause", null);
+        navigator.mediaSession.setActionHandler("stop", null);
+      } catch {
+        // Nothing to clean up on partial Media Session implementations.
+      }
+    };
+  }, [pause, play]);
 
   const setVolume = useCallback((nextVolume: number) => {
     setVolumeState(Math.min(1, Math.max(0, nextVolume)));

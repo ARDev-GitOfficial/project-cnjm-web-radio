@@ -29,7 +29,7 @@ import {
   UploadCloud,
   UsersRound,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Navigate, NavLink, useLocation } from "react-router-dom";
 import { AdImageCropper, type CroppedAdImage } from "../components/AdImageCropper";
 import {
@@ -145,6 +145,16 @@ type DjScheduleDraft = {
 };
 
 type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits" | "api";
+type AdminResource = "ads" | "programs" | "djs" | "audience" | "detection";
+type AdminActivityStatus = "saving" | "confirming" | "complete" | "error";
+
+type AdminActivityItem = {
+  id: number;
+  label: string;
+  detail: string;
+  status: AdminActivityStatus;
+  createdAt: number;
+};
 
 const adminPanelRoutes: Record<AdminPanel, string> = {
   dashboard: "/ads/dashboard",
@@ -156,6 +166,7 @@ const adminPanelRoutes: Record<AdminPanel, string> = {
 };
 
 const ADMIN_QUERY_STALE_TIME_MS = 120_000;
+const ACTIVITY_LOG_LIMIT = 6;
 
 const localAdminPayload = (message?: string): AdsPayload => ({
   ads: loadAds(),
@@ -183,6 +194,12 @@ function panelFromPath(pathname: string): AdminPanel | null {
 export function AdsAdminPage() {
   const queryClient = useQueryClient();
   const location = useLocation();
+  const activePanel = panelFromPath(location.pathname) || "dashboard";
+  const isDashboard = activePanel === "dashboard";
+  const shouldLoadAds = isDashboard || activePanel === "ads";
+  const shouldLoadPrograms = isDashboard || activePanel === "programs";
+  const shouldLoadDjs = isDashboard || activePanel === "djs" || activePanel === "api";
+  const shouldLoadAudience = isDashboard || activePanel === "visits" || activePanel === "djs" || activePanel === "api";
   const [session, setSession] = useState<AdminSession | null>(() => getAdminSession());
   const [loginForm, setLoginForm] = useState<LoginForm>({ login: "", password: "" });
   const [loginError, setLoginError] = useState("");
@@ -207,14 +224,17 @@ export function AdsAdminPage() {
   const [audienceDraft, setAudienceDraft] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [djDetectionDraft, setDjDetectionDraft] = useState(() => normalizeDjDetectionConfig(readLiveStatusTest().djDetectionConfig));
   const [simulationNow, setSimulationNow] = useState(() => Date.now());
+  const [activityLog, setActivityLog] = useState<AdminActivityItem[]>([]);
+  const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
   const audienceSaveInFlightRef = useRef(false);
   const mediaMigrationStartedRef = useRef<string | null>(null);
+  const activitySequenceRef = useRef(0);
   const [isAudienceSaving, setIsAudienceSaving] = useState(false);
   const [isDjDetectionSaving, setIsDjDetectionSaving] = useState(false);
   const [djDetectionDiagnostic, setDjDetectionDiagnostic] = useState<Awaited<ReturnType<typeof fetchDjDetectionStatus>> | null>(null);
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
-    enabled: Boolean(session),
+    enabled: Boolean(session && shouldLoadAds),
     queryFn: async ({ signal }) => {
       if (!session) return localAdminPayload();
       if (session.source === "local") {
@@ -237,7 +257,7 @@ export function AdsAdminPage() {
   });
   const { data: programData, isFetching: isFetchingPrograms } = useQuery({
     queryKey: ["programs-admin", session?.token, session?.source],
-    enabled: Boolean(session),
+    enabled: Boolean(session && shouldLoadPrograms),
     queryFn: async ({ signal }) => {
       if (!session) return localProgramPayload();
       if (session.source === "local") {
@@ -260,7 +280,7 @@ export function AdsAdminPage() {
   });
   const { data: djData, isFetching: isFetchingDjs } = useQuery({
     queryKey: ["djs-admin", session?.token, session?.source],
-    enabled: Boolean(session),
+    enabled: Boolean(session && shouldLoadDjs),
     queryFn: async ({ signal }) => {
       if (!session) return localDjPayload();
       if (session.source === "local") {
@@ -283,7 +303,7 @@ export function AdsAdminPage() {
   });
   const { data: liveStatusData, isFetching: isFetchingLiveStatus } = useQuery({
     queryKey: ["live-status-admin", session?.token, session?.source],
-    enabled: Boolean(session),
+    enabled: Boolean(session && shouldLoadAudience),
     queryFn: async ({ signal }) => {
       if (!session) return localLiveStatusPayload();
       if (session.source === "local") {
@@ -301,7 +321,7 @@ export function AdsAdminPage() {
   });
   const { data: djDetectionData, isFetching: isFetchingDjDetection } = useQuery({
     queryKey: ["dj-detection-admin", session?.token, session?.source],
-    enabled: Boolean(session?.source === "blobs"),
+    enabled: Boolean(session?.source === "blobs" && (isDashboard || activePanel === "api")),
     queryFn: async ({ signal }) => fetchDjDetectionStatus(session?.token || "", false, signal),
     staleTime: ADMIN_QUERY_STALE_TIME_MS,
     refetchOnWindowFocus: false,
@@ -315,9 +335,9 @@ export function AdsAdminPage() {
   const currentProgram = programData?.currentProgram;
   const djs = djData?.djs ?? loadDjs();
   const djDetectionStatus = djDetectionDiagnostic || djDetectionData || null;
-  const isRemote = Boolean(session && data?.source === "blobs");
-  const isLocalMode = Boolean(session && data?.source === "local");
-  const isDisconnected = Boolean(session && data?.source === "fallback");
+  const isDisconnected = Boolean(session?.source === "blobs" && data?.source === "fallback");
+  const isRemote = Boolean(session?.source === "blobs" && !isDisconnected);
+  const isLocalMode = Boolean(session?.source === "local");
   const canManageLiveMetrics = Boolean(session && (session.source === "blobs" || canUseLocalFallback()));
   const isLiveMetricsRemote = Boolean(session?.source === "blobs");
   const canEditAds = isRemote || isLocalMode;
@@ -335,7 +355,6 @@ export function AdsAdminPage() {
   const activeDjCount = useMemo(() => djs.filter((dj) => dj.active).length, [djs]);
   const linkedAdsCount = useMemo(() => ads.filter((ad) => ad.linkUrl).length, [ads]);
   const totalClicks = useMemo(() => ads.reduce((total, ad) => total + ad.clicks, 0), [ads]);
-  const activePanel = panelFromPath(location.pathname);
   const savedManualLiveDj = useMemo(
     () => resolveManualLiveDjStatus(liveTest, simulationNow),
     [liveTest, simulationNow],
@@ -424,7 +443,7 @@ export function AdsAdminPage() {
         if (Number(result.migrated || 0) > 0) {
           setActionMessage(`${result.migrated} imagem(ns) foram migradas automaticamente para WebP.`);
         }
-        refresh();
+        void refresh(["ads", "programs", "djs"]);
       })
       .catch((error) => {
         setActionMessage(error instanceof Error ? error.message : "A migração automática de imagens será retomada no próximo acesso.");
@@ -457,28 +476,57 @@ export function AdsAdminPage() {
     setDjLogoUploadState({ status: "idle", message: "" });
   };
 
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ["ads-admin"] });
-    void queryClient.invalidateQueries({ queryKey: ["public-ads"] });
-    void queryClient.invalidateQueries({ queryKey: ["programs-admin"] });
-    void queryClient.invalidateQueries({ queryKey: ["djs-admin"] });
-    void queryClient.invalidateQueries({ queryKey: ["live-status-admin"] });
-    void queryClient.invalidateQueries({ queryKey: ["dj-detection-admin"] });
-  };
+  const refresh = useCallback(async (resources: AdminResource[] = ["ads", "programs", "djs", "audience", "detection"]) => {
+    const keys: Record<AdminResource, readonly unknown[]> = {
+      ads: ["ads-admin"],
+      programs: ["programs-admin"],
+      djs: ["djs-admin"],
+      audience: ["live-status-admin"],
+      detection: ["dj-detection-admin"],
+    };
+
+    await Promise.all(resources.map((resource) => queryClient.invalidateQueries({ queryKey: keys[resource] })));
+    if (resources.includes("ads")) {
+      await queryClient.invalidateQueries({ queryKey: ["public-ads"] });
+    }
+  }, [queryClient]);
+
+  const beginActivity = useCallback((label: string) => {
+    const id = ++activitySequenceRef.current;
+    setActivityLog((current) => [{
+      id,
+      label,
+      detail: "Enviando alteração",
+      status: "saving" as const,
+      createdAt: Date.now(),
+    }, ...current].slice(0, ACTIVITY_LOG_LIMIT));
+    return id;
+  }, []);
+
+  const updateActivity = useCallback((id: number, status: AdminActivityStatus, detail: string) => {
+    setActivityLog((current) => current.map((item) => item.id === id ? { ...item, status, detail } : item));
+  }, []);
+
+  const confirmActivity = useCallback(async (id: number, resources: AdminResource[], detail = "Alteração confirmada") => {
+    updateActivity(id, "confirming", "Confirmando no painel");
+    await refresh(resources);
+    updateActivity(id, "complete", detail);
+  }, [refresh, updateActivity]);
+
+  const failActivity = useCallback((id: number, message: string) => {
+    updateActivity(id, "error", message);
+  }, [updateActivity]);
 
   const persistLocalAds = (nextAds: SiteAd[]) => {
     saveAds(nextAds.slice(0, MAX_ADS));
-    refresh();
   };
 
   const persistLocalPrograms = (nextPrograms: StationProgram[]) => {
     savePrograms(nextPrograms);
-    refresh();
   };
 
   const persistLocalDjs = (nextDjs: StationDj[]) => {
     saveDjs(nextDjs);
-    refresh();
   };
 
   const persistSettings = async (nextSettings: Partial<AdSettings>) => {
@@ -490,6 +538,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity("Configuração de anúncios");
     try {
       if (isRemote && session) {
         await saveRemoteSettings(session.token, normalized);
@@ -497,9 +546,11 @@ export function AdsAdminPage() {
         saveAdSettings(normalized);
       }
       setActionMessage("Configuração salva.");
-      refresh();
+      await confirmActivity(activityId, ["ads"], "Configuração atualizada");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar a configuração.");
+      const message = error instanceof Error ? error.message : "Não foi possível salvar a configuração.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -545,6 +596,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity(selectedId ? "Atualização de anúncio" : "Novo anúncio");
     try {
       if (isRemote && session) {
         if (isExternalImageUrl(normalized.imageUrl)) {
@@ -561,9 +613,11 @@ export function AdsAdminPage() {
         setSelectedId(normalized.id);
       }
       setActionMessage("Anúncio salvo.");
-      refresh();
+      await confirmActivity(activityId, ["ads"], "Anúncio confirmado");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar o anúncio.");
+      const message = error instanceof Error ? error.message : "Não foi possível salvar o anúncio.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -573,6 +627,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity("Remoção de anúncio");
     try {
       if (isRemote && session) {
         await deleteRemoteAd(session.token, id);
@@ -581,9 +636,11 @@ export function AdsAdminPage() {
       }
       if (selectedId === id) newAd();
       setActionMessage("Anúncio removido.");
-      refresh();
+      await confirmActivity(activityId, ["ads"], "Anúncio removido");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível excluir o anúncio.");
+      const message = error instanceof Error ? error.message : "Não foi possível excluir o anúncio.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -594,6 +651,7 @@ export function AdsAdminPage() {
     }
 
     const next = normalizeAd({ ...ad, active: !ad.active, updatedAt: new Date().toISOString() });
+    const activityId = beginActivity(next.active ? "Ativação de anúncio" : "Pausa de anúncio");
     try {
       if (isRemote && session) {
         await saveRemoteAd(session.token, next);
@@ -601,9 +659,11 @@ export function AdsAdminPage() {
         persistLocalAds(ads.map((item) => (item.id === ad.id ? next : item)));
       }
       setActionMessage(next.active ? "Anúncio ativado." : "Anúncio desativado.");
-      refresh();
+      await confirmActivity(activityId, ["ads"], next.active ? "Anúncio ativo" : "Anúncio pausado");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar o anúncio.");
+      const message = error instanceof Error ? error.message : "Não foi possível alterar o anúncio.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -746,7 +806,7 @@ export function AdsAdminPage() {
         total: pendingAds.length,
       });
       setActionMessage("Migração WebP concluída. Imagens antigas substituídas por versões otimizadas.");
-      refresh();
+      await refresh(["ads"]);
     } catch (error) {
       setConversionState({
         status: "error",
@@ -754,7 +814,7 @@ export function AdsAdminPage() {
         done: convertedCount,
         total: pendingAds.length,
       });
-      refresh();
+      await refresh(["ads"]);
     }
   };
 
@@ -770,6 +830,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity(selectedProgramId ? "Atualização de programação" : "Novo programa");
     try {
       if (isRemote && session) {
         if (isExternalImageUrl(normalized.logoUrl)) {
@@ -788,9 +849,11 @@ export function AdsAdminPage() {
         setSelectedProgramId(normalized.id);
       }
       setActionMessage("Programa salvo.");
-      refresh();
+      await confirmActivity(activityId, ["programs"], "Programação atualizada");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar o programa.");
+      const message = error instanceof Error ? error.message : "Não foi possível salvar o programa.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -800,6 +863,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity("Remoção de programa");
     try {
       if (isRemote && session) {
         await deleteRemoteProgram(session.token, id);
@@ -808,14 +872,17 @@ export function AdsAdminPage() {
       }
       if (selectedProgramId === id) newProgram();
       setActionMessage("Programa removido.");
-      refresh();
+      await confirmActivity(activityId, ["programs"], "Programa removido");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível excluir o programa.");
+      const message = error instanceof Error ? error.message : "Não foi possível excluir o programa.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
   const toggleProgram = async (program: StationProgram) => {
     const next = normalizeProgram({ ...program, active: !program.active, updatedAt: new Date().toISOString() });
+    const activityId = beginActivity(next.active ? "Ativação de programa" : "Pausa de programa");
     try {
       if (isRemote && session) {
         await saveRemoteProgram(session.token, next);
@@ -823,9 +890,11 @@ export function AdsAdminPage() {
         persistLocalPrograms(programs.map((item) => (item.id === program.id ? next : item)));
       }
       setActionMessage(next.active ? "Programa ativado." : "Programa desativado.");
-      refresh();
+      await confirmActivity(activityId, ["programs"], next.active ? "Programa ativo" : "Programa pausado");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar o programa.");
+      const message = error instanceof Error ? error.message : "Não foi possível alterar o programa.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -956,6 +1025,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity(selectedDjId ? "Atualização de DJ" : "Novo DJ");
     try {
       let savedDj = normalized;
       if (isRemote && session) {
@@ -984,9 +1054,11 @@ export function AdsAdminPage() {
       }
 
       setActionMessage(savedDj.scheduleEnabled ? "DJ e agenda salvos." : "DJ salvo sem agenda automática.");
-      refresh();
+      await confirmActivity(activityId, ["djs", "audience"], "DJ e agenda confirmados");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar o DJ.");
+      const message = error instanceof Error ? error.message : "Não foi possível salvar o DJ.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -996,6 +1068,7 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity("Remoção de DJ");
     try {
       if (isRemote && session) {
         await deleteRemoteDj(session.token, id);
@@ -1004,14 +1077,17 @@ export function AdsAdminPage() {
       }
       if (selectedDjId === id) newDj();
       setActionMessage("DJ removido.");
-      refresh();
+      await confirmActivity(activityId, ["djs", "audience"], "DJ removido");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível excluir o DJ.");
+      const message = error instanceof Error ? error.message : "Não foi possível excluir o DJ.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
   const toggleDj = async (dj: StationDj) => {
     const next = normalizeDj({ ...dj, active: !dj.active, updatedAt: new Date().toISOString() });
+    const activityId = beginActivity(next.active ? "Ativação de DJ" : "Pausa de DJ");
     try {
       if (isRemote && session) {
         await saveRemoteDj(session.token, next);
@@ -1019,9 +1095,11 @@ export function AdsAdminPage() {
         persistLocalDjs(djs.map((item) => (item.id === dj.id ? next : item)));
       }
       setActionMessage(next.active ? "DJ ativado." : "DJ desativado.");
-      refresh();
+      await confirmActivity(activityId, ["djs", "audience"], next.active ? "DJ ativo" : "DJ pausado");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar o DJ.");
+      const message = error instanceof Error ? error.message : "Não foi possível alterar o DJ.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -1034,6 +1112,7 @@ export function AdsAdminPage() {
     if (audienceSaveInFlightRef.current) return;
     audienceSaveInFlightRef.current = true;
     setIsAudienceSaving(true);
+    const activityId = beginActivity(successMessage);
 
     try {
       const saved = session.source === "blobs"
@@ -1054,8 +1133,11 @@ export function AdsAdminPage() {
         }),
       );
       setActionMessage(successMessage);
+      await confirmActivity(activityId, ["audience", "detection"], "Alteração aplicada e conferida");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar a audiência.");
+      const message = error instanceof Error ? error.message : "Não foi possível salvar a audiência.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     } finally {
       audienceSaveInFlightRef.current = false;
       setIsAudienceSaving(false);
@@ -1077,7 +1159,6 @@ export function AdsAdminPage() {
       });
       await persistAudienceConfig(next, "Funcionamento da API atualizado.");
       setDjDetectionDiagnostic(null);
-      void queryClient.invalidateQueries({ queryKey: ["dj-detection-admin"] });
     } finally {
       setIsDjDetectionSaving(false);
     }
@@ -1089,12 +1170,15 @@ export function AdsAdminPage() {
       return;
     }
 
+    const activityId = beginActivity("Diagnóstico da rádio");
     try {
       setDjDetectionDiagnostic(await fetchDjDetectionStatus(session.token, true));
       setActionMessage("Diagnóstico atualizado sem gravar histórico de músicas.");
-      refresh();
+      await confirmActivity(activityId, ["detection"], "Diagnóstico atualizado");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível consultar a rádio agora.");
+      const message = error instanceof Error ? error.message : "Não foi possível consultar a rádio agora.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -1105,15 +1189,18 @@ export function AdsAdminPage() {
     }
 
     const isSkipped = Boolean((liveTest.djSkips || []).some((skip) => skip.djId === dj.id));
+    const activityId = beginActivity(isSkipped ? "Reativação da sessão de DJ" : "Pausa da sessão de DJ");
     try {
       const saved = await setRemoteDjSkippedToday(session.token, dj.id, !isSkipped);
       writeLiveStatusTest(saved);
       setLiveTest(saved);
       setAudienceDraft(saved);
       setActionMessage(isSkipped ? "DJ liberado novamente para a sessão de hoje." : "Sessão de hoje ignorada. A próxima agenda permanece intacta.");
-      refresh();
+      await confirmActivity(activityId, ["audience", "detection"], isSkipped ? "Sessão liberada" : "Sessão pausada hoje");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar a sessão de hoje.");
+      const message = error instanceof Error ? error.message : "Não foi possível alterar a sessão de hoje.";
+      setActionMessage(message);
+      failActivity(activityId, message);
     }
   };
 
@@ -1392,6 +1479,25 @@ export function AdsAdminPage() {
     setActionMessage("Rascunho restaurado com os valores salvos.");
   };
 
+  const currentPanelResources: AdminResource[] = activePanel === "dashboard"
+    ? ["ads", "programs", "djs", "audience", "detection"]
+    : activePanel === "ads"
+      ? ["ads"]
+      : activePanel === "programs"
+        ? ["programs"]
+        : activePanel === "djs"
+          ? ["djs", "audience"]
+          : activePanel === "api"
+            ? ["djs", "audience", "detection"]
+            : ["audience"];
+  const pendingActivityCount = activityLog.filter((item) => item.status === "saving" || item.status === "confirming").length;
+  const isPanelRefreshing = isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus || isFetchingDjDetection;
+
+  const refreshCurrentPanel = () => {
+    const activityId = beginActivity("Atualização do painel");
+    void confirmActivity(activityId, currentPanelResources, "Dados conferidos");
+  };
+
   if (!session) {
     return (
       <main className="ads-admin-page login-screen">
@@ -1455,10 +1561,10 @@ export function AdsAdminPage() {
         <div className="admin-top-actions">
           <span className={isRemote ? "source-pill is-remote" : isLocalMode ? "source-pill is-local" : "source-pill is-offline"}>
             {isRemote ? <Database size={15} /> : isLocalMode ? <HardDrive size={15} /> : <AlertTriangle size={15} />}
-            {isRemote ? "Blobs globais" : isLocalMode ? "Modo local" : "Blobs pendentes"}
+            {isRemote ? "Blobs globais" : isLocalMode ? "Modo local" : "Blobs indisponíveis"}
           </span>
-          <button className="ghost-button" type="button" onClick={refresh} disabled={isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus}>
-            <RefreshCw size={16} /> Atualizar
+          <button className="ghost-button" type="button" onClick={refreshCurrentPanel} disabled={isPanelRefreshing || pendingActivityCount > 0}>
+            <RefreshCw className={isPanelRefreshing ? "is-spinning" : undefined} size={16} /> {isPanelRefreshing ? "Atualizando" : "Atualizar"}
           </button>
           <button className="ghost-button" type="button" onClick={logout}>
             <LogOut size={16} /> Sair
@@ -1500,6 +1606,39 @@ export function AdsAdminPage() {
           <UsersRound size={16} /> Audiência
         </NavLink>
       </nav>
+
+      <aside className={isActivityLogOpen || pendingActivityCount ? "admin-activity-dock is-open" : "admin-activity-dock"} aria-live="polite">
+        <button className="admin-activity-toggle" type="button" onClick={() => setIsActivityLogOpen((current) => !current)} aria-expanded={isActivityLogOpen}>
+          <span className={pendingActivityCount ? "admin-activity-icon is-busy" : "admin-activity-icon"}>
+            <Activity size={17} />
+          </span>
+          <span className="admin-activity-copy">
+            <strong>{pendingActivityCount ? "Atualizações em andamento" : "Painel sincronizado"}</strong>
+            <small>{pendingActivityCount ? `${pendingActivityCount} ${pendingActivityCount === 1 ? "alteração" : "alterações"} em conferência` : "Alterações recentes ficam registradas aqui"}</small>
+          </span>
+          <span className="admin-activity-count">{pendingActivityCount || activityLog.length}</span>
+        </button>
+
+        {isActivityLogOpen || pendingActivityCount ? (
+          <ol className="admin-activity-list">
+            {activityLog.length ? activityLog.map((item) => (
+              <li key={item.id} className={`is-${item.status}`}>
+                {item.status === "complete" ? <CheckCircle2 size={16} /> : item.status === "error" ? <AlertTriangle size={16} /> : <RefreshCw className="is-spinning" size={16} />}
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <time dateTime={new Date(item.createdAt).toISOString()}>{formatActivityTime(item.createdAt)}</time>
+              </li>
+            )) : (
+              <li className="is-empty">
+                <CheckCircle2 size={16} />
+                <span><strong>Nenhuma alteração nesta sessão</strong><small>O painel está pronto para operar.</small></span>
+              </li>
+            )}
+          </ol>
+        ) : null}
+      </aside>
 
       {activePanel === "dashboard" ? (
         <>
@@ -3203,6 +3342,13 @@ function parseOptionalMetric(value: string, min: number, max: number) {
 
 function formatAdminNumber(value: number) {
   return new Intl.NumberFormat("pt-BR").format(Math.max(0, Math.round(value)));
+}
+
+function formatActivityTime(timestamp: number) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
 }
 
 function nextSimulationSeed() {

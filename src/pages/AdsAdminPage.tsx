@@ -42,9 +42,11 @@ import {
   emptyAd,
   fetchAdminAds,
   getAdminSession,
+  importRemoteSiteImage,
   loadAdSettings,
   loadAds,
   loginAdsAdmin,
+  migrateStoredSiteImages,
   normalizeAd,
   normalizeAdSettings,
   saveAdSettings,
@@ -81,6 +83,7 @@ import {
   defaultLiveDjControl,
   emptyManualLiveDjSchedule,
   fetchAdminDjs,
+  fetchDjDetectionStatus,
   fetchLiveStatusTest,
   AUDIENCE_DAY_IDS,
   loadDjs,
@@ -98,14 +101,18 @@ import {
   localDjsPayload,
   localLiveStatusPayload,
   normalizeDj,
+  normalizeDjDetectionConfig,
   normalizeLiveStatusTest,
   readLiveStatusTest,
+  resolveConfiguredLiveDjStatus,
   resolveManualLiveDjStatus,
   resolveLiveStatusAudienceProfile,
   resolveLiveStatusTestMetrics,
   saveDjs,
+  setRemoteDjSkippedToday,
   saveRemoteDj,
   saveRemoteLiveStatusTest,
+  uploadDjLogo,
   writeLiveStatusTest,
   type DjsPayload,
   type LiveStatusTestPayload,
@@ -129,6 +136,7 @@ type ConversionState = UploadState & {
   total: number;
 };
 
+// Legacy schedule payloads remain readable until the authenticated migration rewrites them into DJ records.
 type DjScheduleDraft = {
   enabled: boolean;
   dayIds: string[];
@@ -136,7 +144,7 @@ type DjScheduleDraft = {
   endTime: string;
 };
 
-type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits";
+type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits" | "api";
 
 const adminPanelRoutes: Record<AdminPanel, string> = {
   dashboard: "/ads/dashboard",
@@ -144,6 +152,7 @@ const adminPanelRoutes: Record<AdminPanel, string> = {
   programs: "/ads/programacao",
   djs: "/ads/djs",
   visits: "/ads/visitas",
+  api: "/ads/api",
 };
 
 const ADMIN_QUERY_STALE_TIME_MS = 120_000;
@@ -167,6 +176,7 @@ function panelFromPath(pathname: string): AdminPanel | null {
   if (cleanPath === "/ads/programacao") return "programs";
   if (cleanPath === "/ads/djs") return "djs";
   if (cleanPath === "/ads/visitas") return "visits";
+  if (cleanPath === "/ads/api") return "api";
   return null;
 }
 
@@ -192,12 +202,16 @@ export function AdsAdminPage() {
   const [selectedProgramId, setSelectedProgramId] = useState("");
   const [djDraft, setDjDraft] = useState<StationDj>(() => emptyDj());
   const [selectedDjId, setSelectedDjId] = useState("");
-  const [djScheduleDraft, setDjScheduleDraft] = useState<DjScheduleDraft>(() => defaultDjScheduleDraft());
+  const [djLogoUploadState, setDjLogoUploadState] = useState<UploadState>({ status: "idle", message: "" });
   const [liveTest, setLiveTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [audienceDraft, setAudienceDraft] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
+  const [djDetectionDraft, setDjDetectionDraft] = useState(() => normalizeDjDetectionConfig(readLiveStatusTest().djDetectionConfig));
   const [simulationNow, setSimulationNow] = useState(() => Date.now());
   const audienceSaveInFlightRef = useRef(false);
+  const mediaMigrationStartedRef = useRef<string | null>(null);
   const [isAudienceSaving, setIsAudienceSaving] = useState(false);
+  const [isDjDetectionSaving, setIsDjDetectionSaving] = useState(false);
+  const [djDetectionDiagnostic, setDjDetectionDiagnostic] = useState<Awaited<ReturnType<typeof fetchDjDetectionStatus>> | null>(null);
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
     enabled: Boolean(session),
@@ -285,12 +299,22 @@ export function AdsAdminPage() {
     refetchOnReconnect: false,
     retry: false,
   });
+  const { data: djDetectionData, isFetching: isFetchingDjDetection } = useQuery({
+    queryKey: ["dj-detection-admin", session?.token, session?.source],
+    enabled: Boolean(session?.source === "blobs"),
+    queryFn: async ({ signal }) => fetchDjDetectionStatus(session?.token || "", false, signal),
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
 
   const ads = data?.ads ?? [];
   const settings = data?.settings ?? loadAdSettings();
   const programs = programData?.programs ?? loadPrograms();
   const currentProgram = programData?.currentProgram;
   const djs = djData?.djs ?? loadDjs();
+  const djDetectionStatus = djDetectionDiagnostic || djDetectionData || null;
   const isRemote = Boolean(session && data?.source === "blobs");
   const isLocalMode = Boolean(session && data?.source === "local");
   const isDisconnected = Boolean(session && data?.source === "fallback");
@@ -320,6 +344,14 @@ export function AdsAdminPage() {
     () => resolveManualLiveDjStatus(audienceDraft, simulationNow),
     [audienceDraft, simulationNow],
   );
+  const savedConfiguredLiveDj = useMemo(
+    () => resolveConfiguredLiveDjStatus(liveTest, djs, simulationNow),
+    [djs, liveTest, simulationNow],
+  );
+  const draftConfiguredLiveDj = useMemo(
+    () => resolveConfiguredLiveDjStatus(audienceDraft, djs, simulationNow),
+    [audienceDraft, djs, simulationNow],
+  );
   const liveDjControl = useMemo(
     () => normalizeLiveStatusTest(audienceDraft).liveDjControl || defaultLiveDjControl(),
     [audienceDraft],
@@ -329,16 +361,16 @@ export function AdsAdminPage() {
     [liveTest],
   );
   const resolvedLiveMetrics = useMemo(
-    () => resolveLiveStatusTestMetrics(liveTest, simulationNow, { liveDj: savedManualLiveDj }),
-    [liveTest, savedManualLiveDj, simulationNow],
+    () => resolveLiveStatusTestMetrics(liveTest, simulationNow, { liveDj: savedConfiguredLiveDj }),
+    [liveTest, savedConfiguredLiveDj, simulationNow],
   );
   const resolvedDraftMetrics = useMemo(
-    () => resolveLiveStatusTestMetrics(audienceDraft, simulationNow, { liveDj: draftManualLiveDj }),
-    [audienceDraft, draftManualLiveDj, simulationNow],
+    () => resolveLiveStatusTestMetrics(audienceDraft, simulationNow, { liveDj: draftConfiguredLiveDj }),
+    [audienceDraft, draftConfiguredLiveDj, simulationNow],
   );
   const activeAudienceProfile = useMemo(
-    () => resolveLiveStatusAudienceProfile(audienceDraft, simulationNow, { liveDj: draftManualLiveDj }),
-    [audienceDraft, draftManualLiveDj, simulationNow],
+    () => resolveLiveStatusAudienceProfile(audienceDraft, simulationNow, { liveDj: draftConfiguredLiveDj }),
+    [audienceDraft, draftConfiguredLiveDj, simulationNow],
   );
   const visitWaveBars = useMemo(() => makeVisitWaveBars(audienceDraft, simulationNow), [audienceDraft, simulationNow]);
   const isAudienceActive = liveTest.enabled !== false;
@@ -352,6 +384,7 @@ export function AdsAdminPage() {
     const normalized = normalizeLiveStatusTest(liveStatusData.liveStatusTest);
     setLiveTest(normalized);
     setAudienceDraft(normalized);
+    setDjDetectionDraft(normalizeDjDetectionConfig(normalized.djDetectionConfig));
     setSimulationNow(Date.now());
   }, [
     liveStatusData?.liveStatusTest?.enabled,
@@ -373,12 +406,30 @@ export function AdsAdminPage() {
     liveStatusData?.liveStatusTest?.scheduleProfiles,
     liveStatusData?.liveStatusTest?.djProfiles,
     liveStatusData?.liveStatusTest?.liveDjControl,
+    liveStatusData?.liveStatusTest?.djDetectionConfig,
+    liveStatusData?.liveStatusTest?.djSkips,
   ]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setSimulationNow(Date.now()), 5_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (session?.source !== "blobs" || mediaMigrationStartedRef.current === session.token) return;
+    mediaMigrationStartedRef.current = session.token;
+
+    void migrateStoredSiteImages(session.token)
+      .then((result) => {
+        if (Number(result.migrated || 0) > 0) {
+          setActionMessage(`${result.migrated} imagem(ns) foram migradas automaticamente para WebP.`);
+        }
+        refresh();
+      })
+      .catch((error) => {
+        setActionMessage(error instanceof Error ? error.message : "A migração automática de imagens será retomada no próximo acesso.");
+      });
+  }, [session?.source, session?.token]);
 
   const login = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -403,7 +454,7 @@ export function AdsAdminPage() {
     setSelectedProgramId("");
     setDjDraft(emptyDj());
     setSelectedDjId("");
-    setDjScheduleDraft(defaultDjScheduleDraft());
+    setDjLogoUploadState({ status: "idle", message: "" });
   };
 
   const refresh = () => {
@@ -412,6 +463,7 @@ export function AdsAdminPage() {
     void queryClient.invalidateQueries({ queryKey: ["programs-admin"] });
     void queryClient.invalidateQueries({ queryKey: ["djs-admin"] });
     void queryClient.invalidateQueries({ queryKey: ["live-status-admin"] });
+    void queryClient.invalidateQueries({ queryKey: ["dj-detection-admin"] });
   };
 
   const persistLocalAds = (nextAds: SiteAd[]) => {
@@ -483,7 +535,7 @@ export function AdsAdminPage() {
 
   const saveDraft = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalized = normalizeAd({ ...draft, updatedAt: new Date().toISOString() });
+    let normalized = normalizeAd({ ...draft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
       setActionMessage("Conecte o conteúdo global antes de salvar anúncios.");
       return;
@@ -495,6 +547,10 @@ export function AdsAdminPage() {
 
     try {
       if (isRemote && session) {
+        if (isExternalImageUrl(normalized.imageUrl)) {
+          const image = await importRemoteSiteImage(session.token, { kind: "ad", url: normalized.imageUrl });
+          normalized = normalizeAd({ ...normalized, ...image, updatedAt: new Date().toISOString() });
+        }
         const saved = await saveRemoteAd(session.token, normalized);
         setDraft(saved);
         setSelectedId(saved.id);
@@ -704,7 +760,7 @@ export function AdsAdminPage() {
 
   const saveProgramDraft = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalized = normalizeProgram({ ...programDraft, updatedAt: new Date().toISOString() });
+    let normalized = normalizeProgram({ ...programDraft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
       setActionMessage("Conecte o conteúdo global antes de salvar a programação.");
       return;
@@ -716,6 +772,10 @@ export function AdsAdminPage() {
 
     try {
       if (isRemote && session) {
+        if (isExternalImageUrl(normalized.logoUrl)) {
+          const image = await importRemoteSiteImage(session.token, { kind: "program", url: normalized.logoUrl });
+          normalized = normalizeProgram({ ...normalized, logoUrl: image.imageUrl, logoKey: image.imageKey, updatedAt: new Date().toISOString() });
+        }
         const saved = await saveRemoteProgram(session.token, normalized);
         setProgramDraft(saved);
         setSelectedProgramId(saved.id);
@@ -777,15 +837,15 @@ export function AdsAdminPage() {
 
     try {
       const sourceType = imageContentTypeForFile(file);
-      if (sourceType !== "image/png" && sourceType !== "image/webp") throw new Error("Envie uma logo PNG ou WebP.");
+      if (!isAcceptedSourceImageType(sourceType)) throw new Error("Envie uma logo PNG, JPG, WebP ou AVIF.");
       const size = await readImageSize(file);
       if (file.size > PROGRAM_LOGO_MAX_SIZE) throw new Error("A logo precisa ter até 2,5 MB.");
       if (size.width > PROGRAM_LOGO_MAX_DIMENSION || size.height > PROGRAM_LOGO_MAX_DIMENSION) {
         throw new Error(`A logo precisa ter até ${PROGRAM_LOGO_MAX_DIMENSION}px de largura e altura.`);
       }
 
-      if (sourceType === "image/png") {
-        setProgramUploadState({ status: "checking", message: "Convertendo PNG para WebP..." });
+      if (sourceType !== "image/webp") {
+        setProgramUploadState({ status: "checking", message: "Convertendo para WebP..." });
       }
 
       const logo = await prepareProgramLogoUpload(file, size, sourceType);
@@ -805,7 +865,7 @@ export function AdsAdminPage() {
       }
       setProgramUploadState({
         status: "ready",
-        message: logo.converted ? "PNG convertido e logo WebP anexada ao programa." : "Logo WebP anexada ao programa.",
+        message: logo.converted ? "Logo convertida e anexada ao programa em WebP." : "Logo WebP anexada ao programa.",
       });
     } catch (error) {
       setProgramUploadState({
@@ -817,10 +877,62 @@ export function AdsAdminPage() {
     }
   };
 
+  const handleDjLogoFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+
+    setDjLogoUploadState({ status: "checking", message: "Preparando logo WebP..." });
+    try {
+      const sourceType = imageContentTypeForFile(file);
+      if (!isAcceptedSourceImageType(sourceType)) throw new Error("Envie uma imagem PNG, JPG, WebP ou AVIF.");
+      if (file.size > 5_000_000) throw new Error("A imagem de origem precisa ter até 5 MB.");
+      const size = await readImageSize(file);
+
+      if (isRemote && session) {
+        const dataUrl = await readFileAsDataUrl(file);
+        const image = await uploadDjLogo(session.token, {
+          fileName: file.name,
+          contentType: sourceType,
+          width: size.width,
+          height: size.height,
+          dataBase64: dataUrl.split(",")[1] || "",
+        });
+        setDjDraft((current) => normalizeDj({
+          ...current,
+          logoUrl: image.imageUrl,
+          logoKey: image.imageKey,
+          logoWidth: image.imageWidth,
+          logoHeight: image.imageHeight,
+          logoContentType: "image/webp",
+          logoSize: image.imageSize,
+        }));
+      } else {
+        const image = await prepareDjLogoUpload(file, size);
+        setDjDraft((current) => normalizeDj({
+          ...current,
+          logoUrl: image.dataUrl,
+          logoKey: image.fileName,
+          logoWidth: image.width,
+          logoHeight: image.height,
+          logoContentType: image.contentType,
+          logoSize: image.size,
+        }));
+      }
+      setDjLogoUploadState({ status: "ready", message: "Logo quadrada convertida para WebP e anexada ao DJ." });
+    } catch (error) {
+      setDjLogoUploadState({
+        status: "error",
+        message: error instanceof Error ? error.message : "Não foi possível preparar a logo do DJ.",
+      });
+    } finally {
+      event.currentTarget.value = "";
+    }
+  };
+
   const editDj = (dj: StationDj) => {
     setDjDraft(dj);
     setSelectedDjId(dj.id);
-    setDjScheduleDraft(scheduleDraftFromDj(dj, savedLiveDjControl));
+    setDjLogoUploadState({ status: "idle", message: "" });
     setActionMessage("");
   };
 
@@ -828,13 +940,13 @@ export function AdsAdminPage() {
     const fresh = emptyDj();
     setDjDraft(fresh);
     setSelectedDjId("");
-    setDjScheduleDraft(defaultDjScheduleDraft());
+    setDjLogoUploadState({ status: "idle", message: "" });
     setActionMessage("");
   };
 
   const saveDjDraft = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const normalized = normalizeDj({ ...djDraft, updatedAt: new Date().toISOString() });
+    let normalized = normalizeDj({ ...djDraft, updatedAt: new Date().toISOString() });
     if (!canEditAds) {
       setActionMessage("Conecte o conteúdo global antes de salvar DJs.");
       return;
@@ -847,6 +959,19 @@ export function AdsAdminPage() {
     try {
       let savedDj = normalized;
       if (isRemote && session) {
+        if (isExternalImageUrl(normalized.logoUrl)) {
+          const image = await importRemoteSiteImage(session.token, { kind: "dj", url: normalized.logoUrl });
+          normalized = normalizeDj({
+            ...normalized,
+            logoUrl: image.imageUrl,
+            logoKey: image.imageKey,
+            logoWidth: image.imageWidth,
+            logoHeight: image.imageHeight,
+            logoContentType: "image/webp",
+            logoSize: image.imageSize,
+            updatedAt: new Date().toISOString(),
+          });
+        }
         const saved = await saveRemoteDj(session.token, normalized);
         savedDj = saved;
         setDjDraft(saved);
@@ -858,12 +983,8 @@ export function AdsAdminPage() {
         setSelectedDjId(normalized.id);
       }
 
-      if (canManageLiveMetrics && session) {
-        await saveManualScheduleForDj(savedDj, djScheduleDraft);
-      } else {
-        setActionMessage("DJ salvo. A agenda de ao vivo precisa da Central de Audiência ativa.");
-        refresh();
-      }
+      setActionMessage(savedDj.scheduleEnabled ? "DJ e agenda salvos." : "DJ salvo sem agenda automática.");
+      refresh();
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : "Não foi possível salvar o DJ.");
     }
@@ -876,14 +997,10 @@ export function AdsAdminPage() {
     }
 
     try {
-      const removedDj = djs.find((dj) => dj.id === id) || null;
       if (isRemote && session) {
         await deleteRemoteDj(session.token, id);
       } else {
         persistLocalDjs(djs.filter((dj) => dj.id !== id));
-      }
-      if (removedDj && canManageLiveMetrics && session) {
-        await removeManualScheduleForDj(removedDj);
       }
       if (selectedDjId === id) newDj();
       setActionMessage("DJ removido.");
@@ -945,13 +1062,68 @@ export function AdsAdminPage() {
     }
   };
 
+  const applyDjDetectionDraft = async () => {
+    if (!canManageLiveMetrics) {
+      setActionMessage("Conecte o conteúdo global antes de alterar a detecção de DJs.");
+      return;
+    }
+
+    setIsDjDetectionSaving(true);
+    try {
+      const next = normalizeLiveStatusTest({
+        ...liveTest,
+        djDetectionConfig: djDetectionDraft,
+        updatedAt: new Date().toISOString(),
+      });
+      await persistAudienceConfig(next, "Funcionamento da API atualizado.");
+      setDjDetectionDiagnostic(null);
+      void queryClient.invalidateQueries({ queryKey: ["dj-detection-admin"] });
+    } finally {
+      setIsDjDetectionSaving(false);
+    }
+  };
+
+  const runDjDetectionDiagnostic = async () => {
+    if (!session || session.source !== "blobs") {
+      setActionMessage("O diagnóstico com a rádio fica disponível quando o conteúdo global estiver conectado.");
+      return;
+    }
+
+    try {
+      setDjDetectionDiagnostic(await fetchDjDetectionStatus(session.token, true));
+      setActionMessage("Diagnóstico atualizado sem gravar histórico de músicas.");
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível consultar a rádio agora.");
+    }
+  };
+
+  const toggleDjSkipToday = async (dj: StationDj) => {
+    if (!session || session.source !== "blobs") {
+      setActionMessage("Pular somente hoje exige o conteúdo global conectado.");
+      return;
+    }
+
+    const isSkipped = Boolean((liveTest.djSkips || []).some((skip) => skip.djId === dj.id));
+    try {
+      const saved = await setRemoteDjSkippedToday(session.token, dj.id, !isSkipped);
+      writeLiveStatusTest(saved);
+      setLiveTest(saved);
+      setAudienceDraft(saved);
+      setActionMessage(isSkipped ? "DJ liberado novamente para a sessão de hoje." : "Sessão de hoje ignorada. A próxima agenda permanece intacta.");
+      refresh();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "Não foi possível alterar a sessão de hoje.");
+    }
+  };
+
   const saveManualScheduleForDj = async (dj: StationDj, scheduleDraft: DjScheduleDraft) => {
     const savedBase = normalizeLiveStatusTest(liveTest);
     const savedControl = savedBase.liveDjControl || defaultLiveDjControl();
     const existingSchedule = manualScheduleForDj(savedControl, dj);
     const schedulesWithoutDj = savedControl.schedules.filter((schedule) => !manualScheduleMatchesDj(schedule, dj));
     const now = new Date().toISOString();
-    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedManualLiveDj });
+    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedConfiguredLiveDj });
     const nextSchedules = scheduleDraft.enabled
       ? [
           ...schedulesWithoutDj,
@@ -994,7 +1166,7 @@ export function AdsAdminPage() {
     if (!hasSchedule && !isManualLive) return;
 
     const now = new Date().toISOString();
-    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedManualLiveDj });
+    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedConfiguredLiveDj });
     const next = normalizeLiveStatusTest({
       ...savedBase,
       liveDjControl: {
@@ -1148,7 +1320,7 @@ export function AdsAdminPage() {
     const turningOffCurrentDj = dj ? manualControlMatchesDj(savedControl, dj) : draftControl.active;
     const goingActive = !turningOffCurrentDj;
     const now = new Date().toISOString();
-    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedManualLiveDj });
+    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedConfiguredLiveDj });
     const nextDjName = dj?.djName || draftControl.djName || fallbackDj?.djName || "DJ ao vivo";
     const nextProgramName = dj?.programName || draftControl.programName || fallbackDj?.programName || "Programa Ao Vivo";
     const nextControl = normalizeLiveStatusTest({
@@ -1156,6 +1328,7 @@ export function AdsAdminPage() {
         ...savedControl,
         enabled: true,
         active: goingActive,
+        stationDjId: goingActive ? dj?.id || fallbackDj?.id || savedControl.stationDjId || null : null,
         djName: goingActive ? nextDjName : savedControl.djName || nextDjName,
         programName: goingActive ? nextProgramName : savedControl.programName || nextProgramName,
         startedAt: goingActive ? now : null,
@@ -1188,7 +1361,7 @@ export function AdsAdminPage() {
       return;
     }
 
-    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedManualLiveDj });
+    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedConfiguredLiveDj });
     const normalizedDraft = normalizeLiveStatusTest(audienceDraft);
     const now = new Date().toISOString();
     const listenersMin = normalizedDraft.listenersMin ?? LIVE_TEST_DEFAULT_LISTENERS;
@@ -1320,6 +1493,9 @@ export function AdsAdminPage() {
         <NavLink className={activePanel === "djs" ? "is-active" : ""} to={adminPanelRoutes.djs}>
           <Mic2 size={16} /> DJs ao vivo
         </NavLink>
+        <NavLink className={activePanel === "api" ? "is-active" : ""} to={adminPanelRoutes.api}>
+          <Activity size={16} /> Funcionamento da API
+        </NavLink>
         <NavLink className={activePanel === "visits" ? "is-active" : ""} to={adminPanelRoutes.visits}>
           <UsersRound size={16} /> Audiência
         </NavLink>
@@ -1389,6 +1565,122 @@ export function AdsAdminPage() {
             </article>
           </section>
         </>
+      ) : null}
+
+      {activePanel === "api" ? (
+        <section className="audience-admin-page">
+          <section className="audience-hero-panel">
+            <div>
+              <span><Activity size={15} /> Funcionamento da API</span>
+              <h2>Detecção assistida de DJs</h2>
+              <p>A agenda só define quando um DJ pode ser reconhecido. O status ao vivo exige confirmações de metadados ausentes.</p>
+            </div>
+            <div className={djDetectionDraft.enabled ? "audience-live-badge is-active" : "audience-live-badge"}>
+              <span>{djDetectionDraft.enabled ? "Detecção ligada" : "Detecção desligada"}</span>
+              <strong>{djDetectionDraft.pollSeconds}s</strong>
+              <small>intervalo dentro da agenda</small>
+            </div>
+          </section>
+
+          <section className="audience-admin-grid">
+            <form className="audience-control-panel" onSubmit={(event) => { event.preventDefault(); void applyDjDetectionDraft(); }}>
+              <div className="editor-head">
+                <div>
+                  <span><Settings2 size={15} /> Regras de reconhecimento</span>
+                  <h2>Aplicar comportamento</h2>
+                </div>
+              </div>
+
+              <label className="check-line audience-switch">
+                <input
+                  type="checkbox"
+                  checked={djDetectionDraft.enabled}
+                  onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, enabled: event.currentTarget.checked })}
+                  disabled={!canManageLiveMetrics}
+                />
+                Permitir detecção automática nas agendas de DJ
+              </label>
+
+              <div className="audience-field-grid compact">
+                <label>
+                  Intervalo de verificação
+                  <select
+                    value={djDetectionDraft.pollSeconds}
+                    onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, pollSeconds: Number(event.currentTarget.value) as 15 | 30 | 60 })}
+                    disabled={!canManageLiveMetrics}
+                  >
+                    <option value={15}>15 segundos</option>
+                    <option value={30}>30 segundos</option>
+                    <option value={60}>60 segundos</option>
+                  </select>
+                </label>
+                <label>
+                  Confirmações para entrada
+                  <input
+                    type="number"
+                    min="1"
+                    max="5"
+                    value={djDetectionDraft.enterConfirmations}
+                    onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, enterConfirmations: Math.max(1, Math.min(5, Number(event.currentTarget.value) || 1)) })}
+                    disabled={!canManageLiveMetrics}
+                  />
+                </label>
+                <label>
+                  Confirmações para saída
+                  <input
+                    type="number"
+                    min="1"
+                    max="5"
+                    value={djDetectionDraft.exitConfirmations}
+                    onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, exitConfirmations: Math.max(1, Math.min(5, Number(event.currentTarget.value) || 1)) })}
+                    disabled={!canManageLiveMetrics}
+                  />
+                </label>
+              </div>
+
+              <div className="audience-rule-list">
+                <p><CheckCircle2 size={15} /> Três leituras sem música válida entram em ao vivo por padrão.</p>
+                <p><RefreshCw size={15} /> Duas leituras musicais válidas encerram o ao vivo por padrão.</p>
+                <p><AlertTriangle size={15} /> Falhas e tempos esgotados nunca ligam ou desligam um DJ sozinhos.</p>
+              </div>
+
+              <div className="audience-control-actions">
+                <button className="play-main slim" type="submit" disabled={!canManageLiveMetrics || isDjDetectionSaving || isAudienceSaving}>
+                  <Save size={16} /> {isDjDetectionSaving ? "Aplicando..." : "Aplicar"}
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => setDjDetectionDraft(normalizeDjDetectionConfig(liveTest.djDetectionConfig))}
+                  disabled={!canManageLiveMetrics}
+                >
+                  <RefreshCw size={16} /> Descartar rascunho
+                </button>
+              </div>
+            </form>
+
+            <aside className="audience-preview-panel">
+              <div className="editor-head">
+                <div>
+                  <span><Radio size={15} /> Diagnóstico sob demanda</span>
+                  <h2>{djDetectionStatus?.liveDj?.isLive ? "DJ ao vivo" : "Monitorando agenda"}</h2>
+                </div>
+                <button className="ghost-button" type="button" onClick={() => { void runDjDetectionDiagnostic(); }} disabled={session?.source !== "blobs" || isFetchingDjDetection}>
+                  <RefreshCw size={16} /> Testar agora
+                </button>
+              </div>
+              <div className="audience-rule-list">
+                <p><Mic2 size={15} /> Elegível: {djDetectionStatus?.eligibleDj ? `${djDetectionStatus.eligibleDj.djName} · ${djDetectionStatus.eligibleDj.programName}` : "nenhum DJ neste horário"}</p>
+                <p><Activity size={15} /> Estado: {djDetectionStatus?.state.mode || "aguardando"} · leitura {djDetectionStatus?.state.classification || "sem leitura"}</p>
+                <p><Database size={15} /> Origem: {djDetectionStatus?.diagnostic?.source || djDetectionStatus?.state.source || "nenhuma"} · {djDetectionStatus?.diagnostic?.latencyMs ?? djDetectionStatus?.state.latencyMs ?? "-"} ms</p>
+                {djDetectionStatus?.diagnostic?.lastError || djDetectionStatus?.state.lastError ? (
+                  <p><AlertTriangle size={15} /> {djDetectionStatus?.diagnostic?.lastError || djDetectionStatus?.state.lastError}</p>
+                ) : null}
+              </div>
+              <small>O teste registra somente o estado necessário para confirmar entrada ou saída. Título, artista, capa e histórico não são armazenados aqui.</small>
+            </aside>
+          </section>
+        </section>
       ) : null}
 
       {activePanel === "visits" ? (
@@ -1611,6 +1903,7 @@ export function AdsAdminPage() {
             </aside>
           </section>
 
+          {false ? (
           <section className="audience-stack-panel live-dj-control-panel">
             <div className="editor-head">
               <div>
@@ -1635,7 +1928,7 @@ export function AdsAdminPage() {
                 <strong>{draftManualLiveDj ? "AO VIVO" : "Aguardando"}</strong>
                 <p>
                   {draftManualLiveDj
-                    ? `${draftManualLiveDj.programName || "Programa Ao Vivo"} · ${draftManualLiveDj.djName || "DJ ao vivo"}`
+                    ? `${draftManualLiveDj?.programName || "Programa Ao Vivo"} · ${draftManualLiveDj?.djName || "DJ ao vivo"}`
                     : "Sem acionamento manual ou agenda ativa neste momento."}
                 </p>
               </article>
@@ -1775,6 +2068,7 @@ export function AdsAdminPage() {
               </button>
             </div>
           </section>
+          ) : null}
 
           <section className="audience-stack-panel">
             <div className="editor-head">
@@ -1865,6 +2159,7 @@ export function AdsAdminPage() {
             )}
           </section>
 
+          {false ? (
           <section className="audience-stack-panel">
             <div className="editor-head">
               <div>
@@ -1952,6 +2247,7 @@ export function AdsAdminPage() {
               </div>
             )}
           </section>
+          ) : null}
         </section>
       ) : null}
 
@@ -1983,11 +2279,11 @@ export function AdsAdminPage() {
       <section className={webpMigrationAds.length ? "admin-notice webp-migration-panel" : "admin-notice webp-migration-panel is-soft"}>
         <ImageUp size={18} />
         <div>
-          <strong>{webpMigrationAds.length ? `${webpMigrationAds.length} imagem(ns) antiga(s) em PNG` : "Anúncios otimizados em WebP"}</strong>
+          <strong>{webpMigrationAds.length ? "Migração WebP em andamento" : "Acervo em WebP"}</strong>
           <span>
             {webpMigrationAds.length
-              ? "Converta os anúncios cadastrados para WebP e libere os arquivos antigos quando o registro for salvo."
-              : "Novos uploads já saem em WebP 1700 x 450px."}
+              ? "A abertura autenticada converte o acervo armazenado antes de remover os originais."
+              : "Uploads e URLs externas são importados para o Blob somente em WebP."}
           </span>
           {conversionState.message ? (
             <small className={conversionState.status === "error" ? "form-warning" : "upload-ok"}>
@@ -1995,17 +2291,6 @@ export function AdsAdminPage() {
             </small>
           ) : null}
         </div>
-        <button
-          className="ghost-button"
-          type="button"
-          disabled={!webpMigrationAds.length || !canEditAds || conversionState.status === "checking"}
-          onClick={() => {
-            void convertExistingAdsToWebp();
-          }}
-        >
-          <RefreshCw size={16} />
-          {conversionState.status === "checking" ? `${conversionState.done}/${conversionState.total}` : "Converter para WebP"}
-        </button>
       </section>
 
       <AdDisplaySettingsPanel canEditAds={canEditAds} persistSettings={persistSettings} settings={settings} />
@@ -2026,7 +2311,7 @@ export function AdsAdminPage() {
             <UploadCloud size={24} />
             <strong>Cortar imagem para {AD_BANNER_WIDTH} x {AD_BANNER_HEIGHT}</strong>
             <span>Envie PNG, JPG ou WebP. O painel gera o WebP final antes de salvar.</span>
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleImageFile} disabled={!canEditAds} />
+            <input type="file" accept="image/png,image/jpeg,image/webp,image/avif" onChange={handleImageFile} disabled={!canEditAds} />
           </label>
           {uploadState.message ? (
             <small className={uploadState.status === "error" ? "form-warning" : "upload-ok"}>{uploadState.message}</small>
@@ -2080,11 +2365,11 @@ export function AdsAdminPage() {
             </label>
           </div>
           <label>
-            URL manual da imagem
+            URL da imagem
             <input
               value={draft.imageUrl.startsWith("data:") ? "" : draft.imageUrl}
               onChange={(event) => setDraft({ ...draft, imageUrl: event.currentTarget.value })}
-              placeholder="https://dominio.com/anuncio-1700x450.webp"
+              placeholder="https://dominio.com/anuncio-1700x450.png"
             />
           </label>
           <label>
@@ -2226,8 +2511,8 @@ export function AdsAdminPage() {
             <label className={canEditAds ? "upload-drop program-logo-drop" : "upload-drop program-logo-drop is-disabled"}>
               <UploadCloud size={24} />
               <strong>Enviar logo do programa</strong>
-              <span>PNG vira WebP. WebP pronto também é aceito, até 1800px e 2,5 MB.</span>
-              <input type="file" accept="image/png,image/webp" onChange={handleProgramLogoFile} disabled={!canEditAds} />
+              <span>PNG, JPG, WebP ou AVIF entram e são armazenados como WebP, até 1800px e 2,5 MB.</span>
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/avif" onChange={handleProgramLogoFile} disabled={!canEditAds} />
             </label>
             {programUploadState.message ? (
               <small className={programUploadState.status === "error" ? "form-warning" : "upload-ok"}>{programUploadState.message}</small>
@@ -2303,11 +2588,11 @@ export function AdsAdminPage() {
               </label>
             </div>
             <label>
-              URL manual da logo
+            URL da logo
               <input
                 value={programDraft.logoUrl.startsWith("data:") ? "" : programDraft.logoUrl}
                 onChange={(event) => setProgramDraft({ ...programDraft, logoUrl: event.currentTarget.value })}
-                placeholder="https://dominio.com/logo-programa.webp"
+              placeholder="https://dominio.com/logo-programa.png"
               />
             </label>
             <label className="check-line">
@@ -2388,7 +2673,7 @@ export function AdsAdminPage() {
             <div className="editor-head">
               <div>
                 <span>{selectedDjId ? "Editando DJ" : "Novo DJ"}</span>
-                <h2>Cadastro e agenda</h2>
+                <h2>Central de DJs</h2>
               </div>
               <button type="button" className="ghost-button" onClick={newDj} disabled={!canEditAds}>
                 <Plus size={16} /> Novo
@@ -2412,18 +2697,41 @@ export function AdsAdminPage() {
               />
             </label>
 
+            <label className={canEditAds ? "upload-drop" : "upload-drop is-disabled"}>
+              <UploadCloud size={24} />
+              <strong>Logo opcional do DJ</strong>
+              <span>PNG, JPG, WebP ou AVIF entram e o Blob guarda uma versão WebP quadrada.</span>
+              <input type="file" accept="image/png,image/jpeg,image/webp,image/avif" onChange={handleDjLogoFile} disabled={!canEditAds} />
+            </label>
+            {djLogoUploadState.message ? (
+              <small className={djLogoUploadState.status === "error" ? "form-warning" : "upload-ok"}>{djLogoUploadState.message}</small>
+            ) : null}
+            {djDraft.logoUrl ? (
+              <div className="program-logo-preview has-image">
+                <img src={djDraft.logoUrl} alt="Preview da logo do DJ" />
+              </div>
+            ) : null}
+            <label>
+              URL da logo
+              <input
+                value={djDraft.logoUrl.startsWith("data:") ? "" : djDraft.logoUrl}
+                onChange={(event) => setDjDraft({ ...djDraft, logoUrl: event.currentTarget.value, logoKey: "" })}
+                placeholder="https://dominio.com/logo-do-dj.png"
+              />
+            </label>
+
             <div className="dj-schedule-editor">
               <div className="profile-card-head">
                 <label className="check-line">
                   <input
                     type="checkbox"
-                    checked={djScheduleDraft.enabled}
-                    onChange={(event) => setDjScheduleDraft({ ...djScheduleDraft, enabled: event.currentTarget.checked })}
+                    checked={djDraft.scheduleEnabled}
+                    onChange={(event) => setDjDraft({ ...djDraft, scheduleEnabled: event.currentTarget.checked })}
                   />
                   Agenda automática
                 </label>
                 <span className="dj-schedule-badge">
-                  <Clock3 size={14} /> {djScheduleDraft.enabled ? "Ativa" : "Manual apenas"}
+                  <Clock3 size={14} /> {djDraft.scheduleEnabled ? "Ativa" : "Manual apenas"}
                 </span>
               </div>
               <div className="editor-columns">
@@ -2431,30 +2739,30 @@ export function AdsAdminPage() {
                   Entrada
                   <input
                     type="time"
-                    value={djScheduleDraft.startTime}
-                    onChange={(event) => setDjScheduleDraft({ ...djScheduleDraft, startTime: event.currentTarget.value })}
+                    value={djDraft.startTime}
+                    onChange={(event) => setDjDraft({ ...djDraft, startTime: event.currentTarget.value })}
                   />
                 </label>
                 <label>
                   Saída
                   <input
                     type="time"
-                    value={djScheduleDraft.endTime}
-                    onChange={(event) => setDjScheduleDraft({ ...djScheduleDraft, endTime: event.currentTarget.value })}
+                    value={djDraft.endTime}
+                    onChange={(event) => setDjDraft({ ...djDraft, endTime: event.currentTarget.value })}
                   />
                 </label>
               </div>
               <div className="audience-day-row">
                 {AUDIENCE_DAY_IDS.map((dayId) => {
-                  const selected = djScheduleDraft.dayIds.includes(dayId);
+                  const selected = djDraft.dayIds.includes(dayId);
                   return (
                     <button
                       key={dayId}
                       type="button"
                       className={selected ? "is-active" : ""}
-                      onClick={() => setDjScheduleDraft({
-                        ...djScheduleDraft,
-                        dayIds: toggleAudienceDay(djScheduleDraft.dayIds, dayId),
+                      onClick={() => setDjDraft({
+                        ...djDraft,
+                        dayIds: toggleAudienceDay(djDraft.dayIds, dayId),
                       })}
                     >
                       {audienceDayLabel(dayId)}
@@ -2463,8 +2771,31 @@ export function AdsAdminPage() {
                 })}
               </div>
               <small>
-                Quando o horário bater, o topo do site entra em ao vivo e a Central de Audiência usa as regras do DJ antes das regras globais.
+                No horário, este DJ fica elegível. O topo só entra em ao vivo após as confirmações da API ou por ativação manual.
               </small>
+            </div>
+
+            <div className="audience-field-grid compact">
+              <label>
+                Base mínima do DJ
+                <input
+                  type="number"
+                  min="0"
+                  max={LIVE_TEST_MAX_LISTENERS}
+                  value={djDraft.listenersMin}
+                  onChange={(event) => setDjDraft({ ...djDraft, listenersMin: parseLiveMetric(event.currentTarget.value, djDraft.listenersMin, LIVE_TEST_MAX_LISTENERS) })}
+                />
+              </label>
+              <label>
+                Limite do DJ
+                <input
+                  type="number"
+                  min="0"
+                  max={LIVE_TEST_MAX_LISTENERS}
+                  value={djDraft.listenersMax}
+                  onChange={(event) => setDjDraft({ ...djDraft, listenersMax: parseLiveMetric(event.currentTarget.value, djDraft.listenersMax, LIVE_TEST_MAX_LISTENERS) })}
+                />
+              </label>
             </div>
 
             <div className="editor-columns">
@@ -2521,7 +2852,8 @@ export function AdsAdminPage() {
               <div className="ad-grid dj-list-grid">
                 {djs.map((dj) => {
                   const isManualLive = manualControlMatchesDj(savedLiveDjControl, dj);
-                  const schedule = manualScheduleForDj(savedLiveDjControl, dj);
+                  const scheduleActive = dj.scheduleEnabled;
+                  const isSkippedToday = Boolean((liveTest.djSkips || []).some((skip) => skip.djId === dj.id));
                   return (
                     <article key={dj.id} className={dj.active ? "ad-list-item dj-list-item is-active" : "ad-list-item dj-list-item"}>
                       <span className={isManualLive ? "dj-avatar is-live" : "dj-avatar"}>
@@ -2531,12 +2863,12 @@ export function AdsAdminPage() {
                         <strong>{dj.djName || "DJ sem nome"}</strong>
                         <span>{dj.programName || "Programa sem nome"}</span>
                         <small>
-                          {isManualLive ? "Ao vivo manual" : schedule?.enabled ? "Agenda automática" : dj.active ? "Ativo sem agenda" : "Desativado"}
+                          {isManualLive ? "Ao vivo manual" : isSkippedToday ? "Sessão de hoje ignorada" : scheduleActive ? "Aguardando confirmação da API" : dj.active ? "Ativo sem agenda" : "Desativado"}
                         </small>
                       </div>
-                      <span className={schedule?.enabled ? "dj-schedule-summary is-active" : "dj-schedule-summary"}>
-                        {schedule?.enabled ? <CalendarDays size={15} /> : <Clock3 size={15} />}
-                        {schedule?.enabled ? formatManualSchedule(schedule) : "Sem entrada e saída cadastradas"}
+                      <span className={scheduleActive ? "dj-schedule-summary is-active" : "dj-schedule-summary"}>
+                        {scheduleActive ? <CalendarDays size={15} /> : <Clock3 size={15} />}
+                        {scheduleActive ? formatDjSchedule(dj) : "Sem entrada e saída cadastradas"}
                       </span>
                       <div className="ad-list-actions dj-list-actions">
                         <button type="button" onClick={() => editDj(dj)} aria-label="Editar DJ">
@@ -2552,6 +2884,16 @@ export function AdsAdminPage() {
                         >
                           <Radio size={15} /> {isManualLive ? "Desligar manual" : "Ativar manualmente"}
                         </button>
+                        {scheduleActive ? (
+                          <button
+                            type="button"
+                            onClick={() => { void toggleDjSkipToday(dj); }}
+                            disabled={session?.source !== "blobs" || isAudienceSaving}
+                            title="Ignora apenas a ocorrência atual; as próximas agendas continuam normais."
+                          >
+                            <Clock3 size={15} /> {isSkippedToday ? "Liberar hoje" : "Pular hoje"}
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => {
@@ -2580,7 +2922,7 @@ export function AdsAdminPage() {
             ) : (
               <div className="empty-admin">
                 <strong>Nenhum DJ cadastrado</strong>
-                <span>Cadastre nome, programa e horário para o site entrar em ao vivo automaticamente.</span>
+                <span>Cadastre nome, programa e horário para a API poder confirmar o DJ ao vivo.</span>
               </div>
             )}
           </aside>
@@ -2726,8 +3068,14 @@ function imageContentTypeForFile(file: File) {
 
   const name = file.name.toLowerCase();
   if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
   if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".avif")) return "image/avif";
   return "";
+}
+
+function isAcceptedSourceImageType(value: string) {
+  return value === "image/png" || value === "image/jpeg" || value === "image/webp" || value === "image/avif";
 }
 
 async function prepareProgramLogoUpload(
@@ -2783,6 +3131,42 @@ async function prepareProgramLogoUpload(
 function toWebpProgramLogoFileName(fileName: string) {
   const cleanName = fileName.trim().replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "programa";
   return `${cleanName}.webp`;
+}
+
+async function prepareDjLogoUpload(file: File, size: { width: number; height: number }) {
+  const sourceDataUrl = await readFileAsDataUrl(file);
+  const image = await loadImageElement(sourceDataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 512;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Seu navegador não conseguiu preparar o WebP.");
+
+  const cropSize = Math.min(size.width, size.height);
+  const sourceX = Math.max(0, Math.round((size.width - cropSize) / 2));
+  const sourceY = Math.max(0, Math.round((size.height - cropSize) / 2));
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, sourceX, sourceY, cropSize, cropSize, 0, 0, 512, 512);
+  const webpBlob = await canvasToBlob(canvas, "image/webp", 0.86);
+  const dataUrl = await blobToDataUrl(webpBlob);
+  return {
+    fileName: toWebpDjLogoFileName(file.name),
+    contentType: "image/webp" as const,
+    width: 512,
+    height: 512,
+    size: webpBlob.size,
+    dataUrl,
+  };
+}
+
+function toWebpDjLogoFileName(fileName: string) {
+  const cleanName = fileName.trim().replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "dj";
+  return `${cleanName}.webp`;
+}
+
+function isExternalImageUrl(value: string) {
+  return /^https:\/\//i.test(String(value || "").trim());
 }
 
 function toDateTimeInput(value: string | null) {
@@ -2912,6 +3296,7 @@ function toggleAudienceDay(dayIds: string[], dayId: string) {
 
 function manualControlMatchesDj(control: ManualLiveDjControl, dj: StationDj) {
   if (!control.active) return false;
+  if (control.stationDjId) return control.stationDjId === dj.id;
   const controlDj = comparableAdminText(control.djName);
   const controlProgram = comparableAdminText(control.programName);
   const djName = comparableAdminText(dj.djName);
@@ -2923,6 +3308,10 @@ function manualControlMatchesDj(control: ManualLiveDjControl, dj: StationDj) {
       controlDj === djName &&
       (!controlProgram || !programName || controlProgram === programName),
   );
+}
+
+function formatDjSchedule(dj: StationDj) {
+  return `${formatAudienceDayList(dj.dayIds)} · ${dj.startTime} às ${dj.endTime}`;
 }
 
 function comparableAdminText(value: string) {

@@ -323,7 +323,9 @@ export const RadioHomePage = memo(function RadioHomePage() {
   const trackArtist = cleanText((isLiveDj ? liveDj.djName : nowPlaying.track.artist) || STATION_NAME);
   const currentProgramName = cleanText(isLiveDj ? "Programa Ao Vivo" : currentProgram?.program || "Programação musical");
   const defaultCover = optimizedStaticImageUrl(DEFAULT_COVER, { width: 360, height: 360, quality: 84 });
-  const cover = nowPlaying.track.coverUrl?.trim() || currentProgram?.logoUrl?.trim() || defaultCover;
+  const cover = isLiveDj
+    ? liveDj.logoUrl?.trim() || ""
+    : nowPlaying.track.coverUrl?.trim() || currentProgram?.logoUrl?.trim() || defaultCover;
 
   return (
     <main className="radio-page">
@@ -342,16 +344,18 @@ export const RadioHomePage = memo(function RadioHomePage() {
               </div>
 
               <div className="track-line">
-                <img
-                  src={cover}
-                  alt=""
-                  loading="eager"
-                  decoding="async"
-                  draggable={false}
-                  onError={(event) => {
-                    event.currentTarget.src = DEFAULT_COVER;
-                  }}
-                />
+                {cover ? (
+                  <img
+                    src={cover}
+                    alt=""
+                    loading="eager"
+                    decoding="async"
+                    draggable={false}
+                    onError={(event) => {
+                      event.currentTarget.src = DEFAULT_COVER;
+                    }}
+                  />
+                ) : null}
                 <div>
                   <small className="current-program-chip">No ar: {currentProgramName}</small>
                   <MarqueeText as="strong" text={trackTitle} />

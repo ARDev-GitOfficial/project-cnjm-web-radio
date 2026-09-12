@@ -57,6 +57,8 @@ export type UploadedAdImage = {
   imageSize: number;
 };
 
+export type SiteImageKind = "ad" | "program" | "dj";
+
 type ApiPayload = {
   ok?: boolean;
   source?: string;
@@ -394,6 +396,26 @@ export async function uploadAdImage(
   });
   if (!response.image) throw new Error("Upload inválido.");
   return response.image;
+}
+
+export async function importRemoteSiteImage(
+  token: string,
+  payload: { kind: SiteImageKind; url: string },
+) {
+  const response = await requestJson<ApiPayload>(`${API_BASE}/import-image`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.image) throw new Error("Não foi possível importar a imagem.");
+  return response.image;
+}
+
+export async function migrateStoredSiteImages(token: string) {
+  return requestJson<{ ok?: boolean; migrated?: unknown[]; failed?: unknown[] }>(`${API_BASE}/migrate-webp`, {
+    method: "POST",
+    headers: authHeaders(token),
+  });
 }
 
 export function localAdsPayload(message?: string): AdsPayload {

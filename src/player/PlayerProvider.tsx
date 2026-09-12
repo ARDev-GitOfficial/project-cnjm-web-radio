@@ -10,7 +10,14 @@ import {
 } from "react";
 import { fallbackNowPlaying } from "../data/fallbacks";
 import { fetchNowPlaying } from "../lib/api";
-import { applyLiveStatusTest, fetchLiveStatusTest, readLiveStatusTest, type LiveStatusTestPayload } from "../lib/liveDjs";
+import {
+  applyDjLiveState,
+  applyLiveStatusTest,
+  fetchPublicDjLiveState,
+  readLiveStatusTest,
+  type DjLiveState,
+  type LiveStatusTestPayload,
+} from "../lib/liveDjs";
 import type { NowPlayingResponse } from "../types";
 
 type PlayerContextValue = {
@@ -39,8 +46,8 @@ const PlayerContext = createContext<PlayerContextValue | null>(null);
 const STREAM_URL = "https://s03.svrdedicado.org:7586/stream";
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
-const NOW_PLAYING_REFRESH_MS = 120_000;
-const LIVE_STATUS_REFRESH_MS = 60_000;
+// A short public refresh catches scheduled DJ handoffs while the active-DJ response avoids metadata calls.
+const NOW_PLAYING_REFRESH_MS = 60_000;
 const LOCAL_SIMULATION_REFRESH_MS = 5_000;
 
 type BrowserAudioContext = typeof AudioContext;
@@ -61,6 +68,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const filtersRef = useRef<BiquadFilterNode[] | null>(null);
   const lastNowPlayingRefreshRef = useRef(0);
   const liveStatusTestRef = useRef<LiveStatusTestPayload>(readLiveStatusTest());
+  const liveStateRef = useRef<DjLiveState | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -88,17 +96,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const nextTest = data.liveStatusTest || readLiveStatusTest();
     liveStatusTestRef.current = nextTest;
     setLiveStatusTest(nextTest);
-    setNowPlaying(applyLiveStatusTest(data, nextTest));
+    const simulated = applyLiveStatusTest(data, nextTest);
+    setNowPlaying(liveStateRef.current?.liveDj?.isLive ? applyDjLiveState(simulated, liveStateRef.current) : simulated);
     lastNowPlayingRefreshRef.current = Date.now();
   }, []);
 
-  const refreshLiveStatus = useCallback(async () => {
-    const payload = await fetchLiveStatusTest();
-    const nextTest = payload.liveStatusTest || readLiveStatusTest();
-    liveStatusTestRef.current = nextTest;
-    setLiveStatusTest(nextTest);
-    setNowPlaying((current) => applyLiveStatusTest(current, nextTest));
-  }, []);
+  const refreshDjLiveState = useCallback(async () => {
+    const previous = liveStateRef.current;
+    const next = await fetchPublicDjLiveState();
+    liveStateRef.current = next;
+
+    if (next.liveDj?.isLive) {
+      setNowPlaying((current) => applyDjLiveState(current, next));
+      return next;
+    }
+
+    if (previous?.liveDj?.isLive) void refreshNowPlaying();
+    return next;
+  }, [refreshNowPlaying]);
 
   useEffect(() => {
     liveStatusTestRef.current = liveStatusTest;
@@ -156,21 +171,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [refreshNowPlaying]);
 
   useEffect(() => {
-    void refreshLiveStatus();
+    let timer: number | null = null;
+    let stopped = false;
 
-    const refreshWhenVisible = () => {
-      if (document.hidden) return;
-      void refreshLiveStatus();
+    const schedule = (liveState: DjLiveState) => {
+      if (stopped || document.hidden) return;
+      const configuredDelay = liveState.config.enabled && liveState.eligibleDj
+        ? liveState.config.pollSeconds * 1_000
+        : 60_000;
+      const nextBoundary = liveState.sessionEndsAt || liveState.nextEligibleAt;
+      const boundaryMs = nextBoundary ? Date.parse(nextBoundary) : NaN;
+      const untilBoundary = Number.isFinite(boundaryMs) ? boundaryMs - Date.now() + 600 : Infinity;
+      const delay = Math.max(1_000, Math.min(configuredDelay, untilBoundary));
+      timer = window.setTimeout(run, delay);
     };
 
-    const timer = window.setInterval(refreshWhenVisible, LIVE_STATUS_REFRESH_MS);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
+    const run = () => {
+      void refreshDjLiveState().then(schedule);
+    };
 
+    const visibilityChange = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      if (!document.hidden) run();
+    };
+
+    run();
+    document.addEventListener("visibilitychange", visibilityChange);
     return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visibilityChange);
     };
-  }, [refreshLiveStatus]);
+  }, [refreshDjLiveState]);
 
   useEffect(() => {
     const audio = audioRef.current;

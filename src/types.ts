@@ -27,9 +27,13 @@ export type LiveDjStatus = {
   isLive: boolean;
   djName: string | null;
   programName: string | null;
+  logoUrl?: string | null;
+  sessionId?: string | null;
+  listenersMin?: number | null;
+  listenersMax?: number | null;
   matchedSignature?: string | null;
   detectedValue?: string | null;
-  source: "autodj" | "dj" | "test" | "fallback";
+  source: "autodj" | "dj" | "test" | "manual" | "detection" | "metadata" | "fallback";
 };
 
 export type AudienceScheduleProfile = {
@@ -75,11 +79,42 @@ export type ManualLiveDjSchedule = {
 export type ManualLiveDjControl = {
   enabled: boolean;
   active: boolean;
+  stationDjId?: string | null;
   djName: string;
   programName: string;
   startedAt?: string | null;
   updatedAt?: string | null;
   schedules: ManualLiveDjSchedule[];
+};
+
+export type DjDetectionConfig = {
+  enabled: boolean;
+  pollSeconds: 15 | 30 | 60;
+  enterConfirmations: number;
+  exitConfirmations: number;
+  updatedAt?: string | null;
+};
+
+export type DjSkip = {
+  djId: string;
+  occurrenceKey: string;
+  expiresAt: string;
+};
+
+export type DjDetectionMode = "waiting" | "entering" | "live" | "leaving";
+export type DjMetadataClassification = "music" | "no-metadata" | "unknown";
+
+export type DjDetectionState = {
+  mode: DjDetectionMode;
+  djId: string | null;
+  enterCount: number;
+  exitCount: number;
+  classification: DjMetadataClassification | null;
+  source: "metadata" | "shoutcast" | "none";
+  observedAt: string | null;
+  latencyMs: number | null;
+  lastError: string | null;
+  updatedAt: string | null;
 };
 
 export type LiveStatusSimulation = {
@@ -108,6 +143,8 @@ export type LiveStatusSimulation = {
   scheduleProfiles?: AudienceScheduleProfile[];
   djProfiles?: AudienceDjProfile[];
   liveDjControl?: ManualLiveDjControl;
+  djDetectionConfig?: DjDetectionConfig;
+  djSkips?: DjSkip[];
 };
 
 export type HistoryItem = {
@@ -126,6 +163,11 @@ export type NowPlayingResponse = {
   stats: StreamStats;
   liveDj: LiveDjStatus;
   liveStatusTest?: LiveStatusSimulation | null;
+  liveState?: {
+    version: string;
+    pollSeconds: number;
+    nextEligibleAt?: string | null;
+  } | null;
   history: HistoryItem[];
   fetchedAt: string;
   message?: string;

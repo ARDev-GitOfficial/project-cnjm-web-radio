@@ -1,6 +1,9 @@
 import type {
   AudienceDjProfile,
   AudienceScheduleProfile,
+  DjDetectionConfig,
+  DjDetectionState,
+  DjSkip,
   LiveDjStatus,
   LiveStatusSimulation,
   ManualLiveDjControl,
@@ -13,6 +16,18 @@ export type StationDj = {
   signatures: string;
   djName: string;
   programName: string;
+  logoUrl: string;
+  logoKey: string;
+  logoWidth: number;
+  logoHeight: number;
+  logoContentType: "image/webp" | "";
+  logoSize: number;
+  scheduleEnabled: boolean;
+  dayIds: string[];
+  startTime: string;
+  endTime: string;
+  listenersMin: number;
+  listenersMax: number;
   active: boolean;
   sortOrder: number;
   createdAt: string;
@@ -44,6 +59,26 @@ export type LiveStatusTestResponse = {
   message?: string;
 };
 
+export type DjLiveState = {
+  ok: boolean;
+  liveDj: LiveDjStatus | null;
+  eligibleDj: Pick<StationDj, "id" | "djName" | "programName" | "startTime" | "endTime"> | null;
+  state: DjDetectionState;
+  config: DjDetectionConfig;
+  nextEligibleAt: string | null;
+  sessionEndsAt: string | null;
+  version: string;
+  fetchedAt: string;
+  diagnostic?: {
+    classification: DjDetectionState["classification"];
+    source: DjDetectionState["source"];
+    observedAt: string | null;
+    latencyMs: number | null;
+    lastError: string | null;
+  };
+  message?: string;
+};
+
 type ApiDjsPayload = {
   ok?: boolean;
   source?: string;
@@ -51,6 +86,22 @@ type ApiDjsPayload = {
   djs?: Partial<StationDj>[];
   dj?: Partial<StationDj> | null;
   liveStatusTest?: Partial<LiveStatusTestPayload> | null;
+  liveDj?: LiveDjStatus | null;
+  eligibleDj?: Partial<StationDj> | null;
+  state?: Partial<DjDetectionState> | null;
+  config?: Partial<DjDetectionConfig> | null;
+  nextEligibleAt?: string | null;
+  sessionEndsAt?: string | null;
+  version?: string;
+  diagnostic?: DjLiveState["diagnostic"];
+  image?: {
+    imageKey: string;
+    imageUrl: string;
+    imageWidth: number;
+    imageHeight: number;
+    imageContentType: string;
+    imageSize: number;
+  };
   fetchedAt?: string;
 };
 
@@ -96,6 +147,18 @@ export const emptyDj = (): StationDj => {
     signatures: "",
     djName: "",
     programName: "",
+    logoUrl: "",
+    logoKey: "",
+    logoWidth: 0,
+    logoHeight: 0,
+    logoContentType: "",
+    logoSize: 0,
+    scheduleEnabled: false,
+    dayIds: [...AUDIENCE_DAY_IDS],
+    startTime: "18:00",
+    endTime: "23:59",
+    listenersMin: 60,
+    listenersMax: 160,
     active: true,
     sortOrder: 0,
     createdAt: now,
@@ -114,6 +177,23 @@ export function normalizeDj(dj: Partial<StationDj>): StationDj {
     signatures: normalizeSignatures(dj.signatures || ""),
     djName: String(dj.djName || "").trim(),
     programName: String(dj.programName || "").trim(),
+    logoUrl: normalizeDjLogoUrl(dj.logoUrl),
+    logoKey: String(dj.logoKey || "").trim(),
+    logoWidth: normalizeWholeNumber(dj.logoWidth, 0, 0, 1024),
+    logoHeight: normalizeWholeNumber(dj.logoHeight, 0, 0, 1024),
+    logoContentType: String(dj.logoContentType || "").toLowerCase() === "image/webp" ? "image/webp" : "",
+    logoSize: normalizeWholeNumber(dj.logoSize, 0, 0, 2_500_000),
+    scheduleEnabled: dj.scheduleEnabled === true,
+    dayIds: normalizeDayIds(dj.dayIds),
+    startTime: normalizeTime(dj.startTime, "18:00"),
+    endTime: normalizeTime(dj.endTime, "23:59"),
+    listenersMin: normalizeWholeNumber(dj.listenersMin, 60, 0, LIVE_TEST_MAX_LISTENERS),
+    listenersMax: normalizeWholeNumber(
+      dj.listenersMax,
+      Math.max(normalizeWholeNumber(dj.listenersMin, 60, 0, LIVE_TEST_MAX_LISTENERS), 160),
+      normalizeWholeNumber(dj.listenersMin, 60, 0, LIVE_TEST_MAX_LISTENERS),
+      LIVE_TEST_MAX_LISTENERS,
+    ),
     active: dj.active !== false,
     sortOrder: Number.isFinite(Number(dj.sortOrder)) ? Number(dj.sortOrder) : 0,
     createdAt: normalizeIsoString(dj.createdAt) || now,
@@ -175,6 +255,25 @@ export async function deleteRemoteDj(token: string, id: string) {
   });
 }
 
+export async function uploadDjLogo(
+  token: string,
+  payload: {
+    fileName: string;
+    contentType: string;
+    width: number;
+    height: number;
+    dataBase64: string;
+  },
+) {
+  const response = await requestJson<ApiDjsPayload>(`${API_BASE}/upload-logo`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.image) throw new Error("Upload inválido.");
+  return response.image;
+}
+
 export async function fetchLiveStatusTest(signal?: AbortSignal): Promise<LiveStatusTestResponse> {
   try {
     const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", { signal });
@@ -204,6 +303,44 @@ export async function saveRemoteLiveStatusTest(token: string, liveStatusTest: Li
     body: JSON.stringify({ liveStatusTest }),
   });
   return normalizeLiveStatusTest(payload.liveStatusTest || liveStatusTest);
+}
+
+export async function fetchPublicDjLiveState(signal?: AbortSignal): Promise<DjLiveState> {
+  try {
+    const payload = await requestJson<ApiDjsPayload>("/api/live-state", { signal });
+    return hydrateDjLiveState(payload);
+  } catch (error) {
+    return emptyDjLiveState(error instanceof Error ? error.message : "Estado ao vivo indisponível.");
+  }
+}
+
+export async function fetchDjDetectionStatus(token: string, probe = false, signal?: AbortSignal): Promise<DjLiveState> {
+  const payload = await requestJson<ApiDjsPayload>(`/api/dj-detection${probe ? "?probe=1" : ""}`, {
+    signal,
+    headers: authHeaders(token),
+  });
+  return hydrateDjLiveState(payload);
+}
+
+export async function saveDjDetectionConfig(token: string, config: DjDetectionConfig) {
+  const payload = await requestJson<ApiDjsPayload>("/api/dj-detection", {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ config }),
+  });
+  return {
+    liveStatusTest: normalizeLiveStatusTest(payload.liveStatusTest || {}),
+    liveState: hydrateDjLiveState(payload),
+  };
+}
+
+export async function setRemoteDjSkippedToday(token: string, djId: string, skipped = true) {
+  const payload = await requestJson<ApiDjsPayload>(`${API_BASE}/${encodeURIComponent(djId)}/skip-today`, {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ skipped }),
+  });
+  return normalizeLiveStatusTest(payload.liveStatusTest || {});
 }
 
 export function localLiveStatusPayload(message?: string): LiveStatusTestResponse {
@@ -306,6 +443,17 @@ export function resolveLiveStatusAudienceProfile(
 ): ActiveAudienceProfile {
   const test = normalizeLiveStatusTest(payload);
   const globalProfile = globalAudienceProfile(test);
+  if (context.liveDj?.isLive && Number.isFinite(Number(context.liveDj.listenersMin)) && Number.isFinite(Number(context.liveDj.listenersMax))) {
+    const listenersMin = normalizeWholeNumber(context.liveDj.listenersMin, globalProfile.listenersMin, 0, LIVE_TEST_MAX_LISTENERS);
+    return {
+      ...globalProfile,
+      source: "dj",
+      label: context.liveDj.djName || context.liveDj.programName || "DJ ao vivo",
+      listenersMin,
+      listenersMax: normalizeWholeNumber(context.liveDj.listenersMax, Math.max(listenersMin, globalProfile.listenersMax), listenersMin, LIVE_TEST_MAX_LISTENERS),
+      liveBoostPercent: 0,
+    };
+  }
   const djProfile = matchingDjAudienceProfile(test.djProfiles || [], context.liveDj);
   if (djProfile) return { ...globalProfile, ...profileFromDj(djProfile), source: "dj" };
 
@@ -317,10 +465,9 @@ export function resolveLiveStatusAudienceProfile(
 
 export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLiveStatusTest()): NowPlayingResponse {
   const test = normalizeLiveStatusTest(payload);
-  const manualLiveDj = resolveManualLiveDjStatus(test);
-  const liveDj = manualLiveDj || data.liveDj;
-  const track = manualLiveDj ? trackFromLiveDj(data.track, manualLiveDj) : data.track;
-  if (!test.enabled && !manualLiveDj) return { ...data, track, liveDj, liveStatusTest: test };
+  const liveDj = data.liveDj;
+  const track = data.track;
+  if (!test.enabled && !liveDj?.isLive) return { ...data, track, liveDj, liveStatusTest: test };
 
   const { listeners, visitors } = resolveLiveStatusTestMetrics(test, Date.now(), { liveDj });
 
@@ -340,11 +487,134 @@ export function applyLiveStatusTest(data: NowPlayingResponse, payload = readLive
   };
 }
 
+export function applyDjLiveState(data: NowPlayingResponse, liveState: DjLiveState): NowPlayingResponse {
+  if (!liveState.liveDj?.isLive) return data;
+
+  const next = {
+    ...data,
+    liveDj: liveState.liveDj,
+    track: trackFromLiveDj(data.track, liveState.liveDj),
+  };
+  return applyLiveStatusTest(next, data.liveStatusTest || readLiveStatusTest());
+}
+
 function hydrateDjsPayload(payload: ApiDjsPayload, fallbackSource: DjsSource): DjsPayload {
   return {
     djs: (payload.djs || []).map(normalizeDj).sort(sortDjs),
     source: payload.source === "blobs" ? "blobs" : fallbackSource,
     fetchedAt: payload.fetchedAt || new Date().toISOString(),
+    message: payload.message,
+  };
+}
+
+function emptyDjDetectionConfig(): DjDetectionConfig {
+  return {
+    enabled: true,
+    pollSeconds: 15,
+    enterConfirmations: 3,
+    exitConfirmations: 2,
+    updatedAt: null,
+  };
+}
+
+export function normalizeDjDetectionConfig(value: unknown): DjDetectionConfig {
+  const item = value && typeof value === "object" ? value as Partial<DjDetectionConfig> : {};
+  const pollSeconds = Number(item.pollSeconds);
+  return {
+    enabled: item.enabled !== false,
+    pollSeconds: pollSeconds === 30 || pollSeconds === 60 ? pollSeconds : 15,
+    enterConfirmations: normalizeWholeNumber(item.enterConfirmations, 3, 1, 5),
+    exitConfirmations: normalizeWholeNumber(item.exitConfirmations, 2, 1, 5),
+    updatedAt: normalizeIsoString(item.updatedAt) || null,
+  };
+}
+
+function emptyDjDetectionState(): DjDetectionState {
+  return {
+    mode: "waiting",
+    djId: null,
+    enterCount: 0,
+    exitCount: 0,
+    classification: null,
+    source: "none",
+    observedAt: null,
+    latencyMs: null,
+    lastError: null,
+    updatedAt: null,
+  };
+}
+
+function normalizeDjDetectionState(value: unknown): DjDetectionState {
+  const item = value && typeof value === "object" ? value as Partial<DjDetectionState> : {};
+  const base = emptyDjDetectionState();
+  return {
+    ...base,
+    mode: item.mode === "entering" || item.mode === "live" || item.mode === "leaving" ? item.mode : "waiting",
+    djId: item.djId ? String(item.djId) : null,
+    enterCount: normalizeWholeNumber(item.enterCount, 0, 0, 5),
+    exitCount: normalizeWholeNumber(item.exitCount, 0, 0, 5),
+    classification: item.classification === "music" || item.classification === "no-metadata" || item.classification === "unknown"
+      ? item.classification
+      : null,
+    source: item.source === "metadata" || item.source === "shoutcast" ? item.source : "none",
+    observedAt: normalizeIsoString(item.observedAt) || null,
+    latencyMs: Number.isFinite(Number(item.latencyMs)) ? Math.max(0, Math.round(Number(item.latencyMs))) : null,
+    lastError: String(item.lastError || "").trim() || null,
+    updatedAt: normalizeIsoString(item.updatedAt) || null,
+  };
+}
+
+function normalizeDjSkips(value: unknown): DjSkip[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => entry && typeof entry === "object" ? entry as Partial<DjSkip> : {})
+    .map((entry) => ({
+      djId: String(entry.djId || "").trim(),
+      occurrenceKey: String(entry.occurrenceKey || "").trim(),
+      expiresAt: normalizeIsoString(entry.expiresAt) || "",
+    }))
+    .filter((entry) => entry.djId && /^\d{4}-\d{2}-\d{2}$/.test(entry.occurrenceKey) && entry.expiresAt && Date.parse(entry.expiresAt) > Date.now())
+    .slice(0, 100);
+}
+
+function emptyDjLiveState(message?: string): DjLiveState {
+  return {
+    ok: false,
+    liveDj: null,
+    eligibleDj: null,
+    state: emptyDjDetectionState(),
+    config: emptyDjDetectionConfig(),
+    nextEligibleAt: null,
+    sessionEndsAt: null,
+    version: "unavailable",
+    fetchedAt: new Date().toISOString(),
+    message,
+  };
+}
+
+function hydrateDjLiveState(payload: ApiDjsPayload): DjLiveState {
+  const eligible = payload.eligibleDj && payload.eligibleDj.id
+    ? normalizeDj(payload.eligibleDj)
+    : null;
+  return {
+    ok: payload.ok !== false,
+    liveDj: payload.liveDj?.isLive ? payload.liveDj : null,
+    eligibleDj: eligible
+      ? {
+          id: eligible.id,
+          djName: eligible.djName,
+          programName: eligible.programName,
+          startTime: eligible.startTime,
+          endTime: eligible.endTime,
+        }
+      : null,
+    state: normalizeDjDetectionState(payload.state),
+    config: normalizeDjDetectionConfig(payload.config),
+    nextEligibleAt: normalizeIsoString(payload.nextEligibleAt) || null,
+    sessionEndsAt: normalizeIsoString(payload.sessionEndsAt) || null,
+    version: String(payload.version || "waiting"),
+    fetchedAt: payload.fetchedAt || new Date().toISOString(),
+    diagnostic: payload.diagnostic,
     message: payload.message,
   };
 }
@@ -437,6 +707,8 @@ export function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>)
     scheduleProfiles: normalizeAudienceScheduleProfiles(payload.scheduleProfiles),
     djProfiles: normalizeAudienceDjProfiles(payload.djProfiles),
     liveDjControl: normalizeLiveDjControl(payload.liveDjControl),
+    djDetectionConfig: normalizeDjDetectionConfig(payload.djDetectionConfig),
+    djSkips: normalizeDjSkips(payload.djSkips),
   };
 }
 
@@ -477,6 +749,7 @@ export function defaultLiveDjControl(): ManualLiveDjControl {
   return {
     enabled: true,
     active: false,
+    stationDjId: null,
     djName: "",
     programName: "",
     startedAt: null,
@@ -506,15 +779,28 @@ export function resolveManualLiveDjStatus(payload: LiveStatusTestPayload, nowMs 
     return manualLiveDjStatus(control.djName, control.programName, "manual", "controle manual");
   }
 
-  const activeSchedule = matchingManualLiveDjSchedule(control.schedules, nowMs);
-  if (!activeSchedule) return null;
+  return null;
+}
 
-  return manualLiveDjStatus(
-    activeSchedule.djName,
-    activeSchedule.programName,
-    "agenda-manual",
-    `${activeSchedule.startTime}-${activeSchedule.endTime}`,
-  );
+export function resolveConfiguredLiveDjStatus(
+  payload: LiveStatusTestPayload,
+  djs: StationDj[],
+  nowMs = Date.now(),
+): LiveDjStatus | null {
+  const control = normalizeLiveStatusTest(payload).liveDjControl || defaultLiveDjControl();
+  const activeDjs = djs.map(normalizeDj).filter((dj) => dj.active);
+  if (!control.enabled) return null;
+
+  if (control.active) {
+    const manualDj = control.stationDjId
+      ? activeDjs.find((dj) => dj.id === control.stationDjId)
+      : activeDjs.find((dj) => matchesLiveDjControl(dj, control));
+    return manualDj
+      ? liveDjStatusFromStationDj(manualDj, "manual", "controle manual")
+      : manualLiveDjStatus(control.djName, control.programName, "manual", "controle manual");
+  }
+
+  return null;
 }
 
 function normalizeAudienceScheduleProfiles(value: unknown): AudienceScheduleProfile[] {
@@ -567,6 +853,7 @@ function normalizeLiveDjControl(value: unknown): ManualLiveDjControl {
   return {
     enabled: item.enabled !== false,
     active: item.active === true,
+    stationDjId: item.stationDjId ? String(item.stationDjId).trim() : null,
     djName: String(item.djName || "").trim(),
     programName: String(item.programName || "").trim(),
     startedAt: normalizeIsoString(item.startedAt) || null,
@@ -614,6 +901,49 @@ function manualLiveDjStatus(djName: string, programName: string, matchedSignatur
     detectedValue,
     source: "test",
   };
+}
+
+function liveDjStatusFromStationDj(dj: StationDj, matchedSignature: string, detectedValue: string): LiveDjStatus {
+  return {
+    ...manualLiveDjStatus(dj.djName, dj.programName, matchedSignature, detectedValue),
+    logoUrl: dj.logoUrl || null,
+    sessionId: dj.id,
+    listenersMin: dj.listenersMin,
+    listenersMax: dj.listenersMax,
+  };
+}
+
+function matchesLiveDjControl(dj: StationDj, control: ManualLiveDjControl) {
+  const controlDjName = comparableText(control.djName);
+  const controlProgramName = comparableText(control.programName);
+  return Boolean(
+    controlDjName &&
+    comparableText(dj.djName) === controlDjName &&
+    (!controlProgramName || comparableText(dj.programName) === controlProgramName),
+  );
+}
+
+function stationDjScheduleActive(dj: StationDj, nowMs: number) {
+  const parts = saoPauloTimeParts(nowMs);
+  const start = timeToMinutes(dj.startTime);
+  const end = timeToMinutes(dj.endTime);
+  if (start === end) return dj.dayIds.includes(parts.dayId);
+  if (start < end) return dj.dayIds.includes(parts.dayId) && isMinuteWithinWindow(parts.minuteOfDay, start, end);
+  if (parts.minuteOfDay >= start) return dj.dayIds.includes(parts.dayId);
+  return parts.minuteOfDay < end && dj.dayIds.includes(previousAudienceDay(parts.dayId));
+}
+
+function previousAudienceDay(dayId: string) {
+  const index = AUDIENCE_DAY_IDS.indexOf(dayId as (typeof AUDIENCE_DAY_IDS)[number]);
+  return AUDIENCE_DAY_IDS[(index + AUDIENCE_DAY_IDS.length - 1) % AUDIENCE_DAY_IDS.length] || "Sun";
+}
+
+function comparableText(value: string) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, "");
 }
 
 function trackFromLiveDj(track: NowPlayingResponse["track"], liveDj: LiveDjStatus): NowPlayingResponse["track"] {
@@ -714,11 +1044,6 @@ function isAudienceScheduleActive(
   return false;
 }
 
-function previousAudienceDay(dayId: string) {
-  const index = AUDIENCE_DAY_IDS.indexOf(dayId as (typeof AUDIENCE_DAY_IDS)[number]);
-  return AUDIENCE_DAY_IDS[(index + AUDIENCE_DAY_IDS.length - 1) % AUDIENCE_DAY_IDS.length] || "Sun";
-}
-
 function easedProgress(elapsedMinutes: number, durationMinutes: number) {
   if (durationMinutes <= 0) return 1;
   const progress = Math.max(0, Math.min(1, elapsedMinutes / durationMinutes));
@@ -746,6 +1071,11 @@ function normalizeDayIds(value: unknown) {
 function normalizeTime(value: unknown, fallback: string) {
   const clean = String(value || "").trim();
   return /^\d{2}:\d{2}$/.test(clean) ? clean : fallback;
+}
+
+function normalizeDjLogoUrl(value: unknown) {
+  const clean = String(value || "").trim();
+  return clean.startsWith("/api/ads/image/") || clean.startsWith("data:image/webp;base64,") ? clean : "";
 }
 
 function comparableAudienceText(value: unknown) {
@@ -777,8 +1107,9 @@ function timeToMinutes(value: string) {
 }
 
 function isMinuteWithinWindow(current: number, start: number, end: number) {
-  if (start <= end) return current >= start && current <= end;
-  return current >= start || current <= end;
+  if (start === end) return true;
+  if (start < end) return current >= start && current < end;
+  return current >= start || current < end;
 }
 
 function normalizeWholeNumber(value: unknown, fallback: number, min: number, max: number) {

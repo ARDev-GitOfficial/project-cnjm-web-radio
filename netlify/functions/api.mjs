@@ -2,11 +2,15 @@ import { connectLambda } from "@netlify/blobs";
 import {
   adminSessionPayload,
   applyLiveStatusSimulation,
+  advanceDjDetectionObservation,
   deleteAd,
   deleteDj,
   deleteProgram,
   getAdSettings,
+  getCurrentLiveDjStatus,
+  getDjDetectionSnapshot,
   getLiveStatusTest,
+  importSiteImage,
   isAdminRequest,
   isValidAdminLogin,
   listAdminAds,
@@ -14,14 +18,17 @@ import {
   listAdminPrograms,
   listPublicAds,
   listPublicPrograms,
+  migrateStoredMediaToWebp,
   readAdImage,
   saveAd,
   saveAdImage,
   saveAdSettings,
   saveDj,
+  saveDjLogo,
   saveLiveStatusTest,
   saveProgram,
   saveProgramLogo,
+  setDjSkippedToday,
   updateAdStats,
 } from "../lib/ads-store.mjs";
 
@@ -29,6 +36,7 @@ const STATISTICS_URL = "https://s03.svrdedicado.org:7586/statistics?json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
 const CAMERA_PAGE_URL = "https://player.svrdedicado.org/one-page/7586";
 const CHAT_MESSAGES_URL = "https://player.svrdedicado.org/chat/7586/lista?limit=80";
+const STREAM_METADATA_URL = String(process.env.CNJM_STREAM_METADATA_URL || "").trim();
 
 const SAFE_NOW_PLAYING = "Web Rádio Conexão Jamaica - Programação ao vivo";
 
@@ -107,29 +115,29 @@ function publicCacheHeaders({ browserMaxAge = 60, cdnMaxAge = 300, staleWhileRev
 }
 
 const publicAdsCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 1800,
-  cdnMaxAge: 7200,
-  staleWhileRevalidate: 21600,
+  browserMaxAge: 600,
+  cdnMaxAge: 1800,
+  staleWhileRevalidate: 3600,
 });
 const publicProgramsCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 1800,
-  cdnMaxAge: 7200,
-  staleWhileRevalidate: 21600,
+  browserMaxAge: 900,
+  cdnMaxAge: 3600,
+  staleWhileRevalidate: 7200,
 });
 const nowPlayingCacheHeaders = publicCacheHeaders({
   browserMaxAge: 120,
   cdnMaxAge: 120,
   staleWhileRevalidate: 600,
 });
+const liveDjNowPlayingCacheHeaders = publicCacheHeaders({
+  browserMaxAge: 15,
+  cdnMaxAge: 30,
+  staleWhileRevalidate: 0,
+});
 const recentTracksCacheHeaders = publicCacheHeaders({
   browserMaxAge: 600,
   cdnMaxAge: 900,
   staleWhileRevalidate: 3600,
-});
-const liveStatusCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 15,
-  cdnMaxAge: 30,
-  staleWhileRevalidate: 0,
 });
 const cameraCacheHeaders = publicCacheHeaders({
   browserMaxAge: 3600,
@@ -192,24 +200,42 @@ function readJsonBody(event) {
 }
 
 async function fetchText(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "CNJMRadioSite/1.0",
-      Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  let response;
+
+  try {
+    response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "CNJMRadioSite/1.0",
+        Accept: "text/html,application/json;q=0.9,*/*;q=0.8",
+      },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.text();
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "CNJMRadioSite/1.0",
-      Accept: "application/json",
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
+  let response;
+
+  try {
+    response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "CNJMRadioSite/1.0",
+        Accept: "application/json",
+      },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
@@ -334,159 +360,137 @@ async function fetchStreamStats() {
   return normalizeStreamStatsPayload(await fetchJson(STATISTICS_URL));
 }
 
-function parseSourceTrack(rawValue) {
-  const raw = normalizePublicText(rawValue) || SAFE_NOW_PLAYING;
-  const parts = raw.split(/\s(?:-|–|—|\||\/)\s/).map(normalizePublicText).filter(Boolean);
+function readXmlField(xml, fieldName) {
+  const escaped = String(fieldName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(xml).match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, "i"));
+  return match ? normalizePublicText(stripTags(match[1])) : "";
+}
 
-  if (parts.length >= 2) {
-    return {
-      artist: parts[0],
-      title: parts.slice(1).join(" - "),
-      raw,
-      album: null,
-    };
+function readMetadataField(payload, xml, ...names) {
+  for (const name of names) {
+    const value = payload && typeof payload === "object" ? payload[name] : "";
+    const clean = normalizePublicText(value || "");
+    if (clean) return clean;
+
+    const xmlValue = readXmlField(xml, name);
+    if (xmlValue) return xmlValue;
   }
+  return "";
+}
 
+function parsePrimaryStreamMetadata(rawResponse) {
+  const text = String(rawResponse || "").trim();
+  let payload = null;
+  if (text.startsWith("{")) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = null;
+    }
+  }
+  const fields = payload?.info && typeof payload.info === "object" ? payload.info : payload;
+  const status = readMetadataField(fields, text, "status");
+  const songTitle = readMetadataField(fields, text, "musica_atual", "musicaAtual", "songtitle", "songTitle");
+  const coverUrl = readMetadataField(fields, text, "capa_musica", "capaMusica", "coverUrl", "cover_url");
+  const listeners = Number(readMetadataField(fields, text, "ouvintes_conectados", "ouvintesConectados", "currentlisteners")) || 0;
+  const bitrate = readMetadataField(fields, text, "plano_bitrate", "planoBitrate", "bitrate") || "128";
+  const genre = readMetadataField(fields, text, "genero", "genre") || "Reggae";
+
+  if (!status && !songTitle) throw new Error("Resposta de metadados da rádio inválida.");
+
+  return {
+    songTitle,
+    coverUrl: isSafeCoverUrl(coverUrl) ? coverUrl : null,
+    listeners,
+    bitrate,
+    genre,
+    isOnline: /^(ligado|online|on|1|true)$/i.test(status) || Boolean(songTitle),
+  };
+}
+
+async function fetchPrimaryStreamMetadata() {
+  if (!STREAM_METADATA_URL) throw new Error("CNJM_STREAM_METADATA_URL não configurada.");
+  return parsePrimaryStreamMetadata(await fetchText(STREAM_METADATA_URL));
+}
+
+function classifyDjMetadata(songTitle) {
+  const title = normalizePublicText(songTitle);
+  return title && !isTechnicalTrack(title) ? "music" : "no-metadata";
+}
+
+function publicDetectionError(error) {
+  if (error instanceof Error && /abort/i.test(error.name || "")) return "Tempo limite ao consultar a rádio.";
+  if (error instanceof Error && /^HTTP\s+\d+/i.test(error.message)) return "A rádio não respondeu à consulta de metadados.";
+  return "Metadados da rádio indisponíveis.";
+}
+
+async function fetchDjDetectionObservation() {
+  const startedAt = Date.now();
+
+  try {
+    const metadata = await fetchPrimaryStreamMetadata();
+    return {
+      classification: classifyDjMetadata(metadata.songTitle),
+      source: "metadata",
+      observedAt: new Date().toISOString(),
+      latencyMs: Date.now() - startedAt,
+      lastError: null,
+    };
+  } catch (primaryError) {
+    try {
+      const stats = await fetchStreamStats();
+      return {
+        classification: classifyDjMetadata(stats.songtitle),
+        source: "shoutcast",
+        observedAt: new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        lastError: null,
+      };
+    } catch (fallbackError) {
+      return {
+        classification: "unknown",
+        source: "none",
+        observedAt: new Date().toISOString(),
+        latencyMs: Date.now() - startedAt,
+        lastError: publicDetectionError(fallbackError || primaryError),
+      };
+    }
+  }
+}
+
+function trackFromPrimaryMetadata(metadata) {
+  const rawValue = metadata.songTitle || SAFE_NOW_PLAYING;
+  const track = isTechnicalTrack(rawValue) ? parseTrack(SAFE_NOW_PLAYING) : parseTrack(rawValue);
+  return {
+    ...track,
+    album: null,
+    coverUrl: metadata.coverUrl,
+  };
+}
+
+function trackFromShoutcastFallback(rawValue) {
+  const raw = normalizePublicText(rawValue) || SAFE_NOW_PLAYING;
   return {
     artist: "Web Rádio Conexão Jamaica",
     title: raw,
     raw,
     album: null,
+    coverUrl: null,
   };
 }
 
-function xmlValue(xml, tagName) {
-  const expression = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, "i");
-  return normalizePublicText(String(xml).match(expression)?.[1] ?? "");
-}
-
-async function fetchServerMetadata() {
-  const metadataUrl = normalizePublicText(process.env.CNJM_STREAM_METADATA_URL || "");
-  if (!metadataUrl) throw new Error("CNJM_STREAM_METADATA_URL não configurada.");
-
-  const xml = await fetchText(metadataUrl);
-  const listenerCount = Number(xmlValue(xml, "ouvintes_conectados"));
-  const title = xmlValue(xml, "musica_atual");
-  const status = xmlValue(xml, "status");
-  const streamStats = {
-    currentlisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
-    peaklisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
-    uniquelisteners: Number.isFinite(listenerCount) ? listenerCount : 0,
-    streamhits: 0,
-    servergenre: xmlValue(xml, "genero") || "Reggae",
-    bitrate: xmlValue(xml, "plano_bitrate") || "128",
-    streamstatus: /^(?:ligado|online|on)$/i.test(status) ? 1 : 0,
-    streamuptime: null,
-    streamsource: null,
-  };
-
-  return {
-    stats: streamStats,
-    track: {
-      ...parseSourceTrack(title),
-      coverUrl: isSafeCoverUrl(xmlValue(xml, "capa_musica")) ? xmlValue(xml, "capa_musica") : null,
-    },
-  };
-}
-
-function comparableLiveValue(value) {
-  return normalizePublicText(value)
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/\s+/g, "");
-}
-
-function djSignatures(dj) {
-  return String(dj?.signatures || "")
-    .split(/[\n,;]+/)
-    .map((signature) => signature.trim())
-    .filter(Boolean);
-}
-
-function maybeDjLoginValue(value) {
-  const clean = normalizePublicText(value);
-  return /^[a-z0-9_.-]+(?::[a-z0-9_.-]+)?$/i.test(clean) ? clean : null;
-}
-
-function liveDjCandidates(stats, rawValue) {
+function safeHistoryFallback() {
+  const track = parseTrack(SAFE_NOW_PLAYING);
   return [
-    stats.streamsource,
-    stats.source,
-    stats.dj,
-    stats.DJ,
-    stats.Dj,
-    stats.dj_login,
-    stats.djLogin,
-    stats.djName,
-    stats.djname,
-    stats.currentdj,
-    stats.currentDj,
-    stats.currentDJ,
-    stats.current_dj,
-    stats.sourceUserId,
-    stats.source_user_id,
-    stats.encoder,
-    stats.username,
-    stats.user,
-    stats.login,
-    maybeDjLoginValue(rawValue),
-  ].filter(Boolean);
-}
-
-function resolveLiveDjStatus(stats, rawValue, djs) {
-  const isOnline = Number(stats.streamstatus ?? 0) === 1;
-  if (!isOnline) {
-    return {
-      state: "offline",
-      isLive: false,
-      djName: null,
-      programName: null,
-      matchedSignature: null,
-      detectedValue: null,
-      source: "autodj",
-    };
-  }
-
-  const candidates = liveDjCandidates(stats, rawValue);
-  for (const dj of djs) {
-    if (dj?.active === false) continue;
-
-    for (const signature of djSignatures(dj)) {
-      const cleanSignature = comparableLiveValue(signature);
-      if (cleanSignature.length < 3) continue;
-
-      const match = candidates.find((candidate) => {
-        const cleanCandidate = comparableLiveValue(candidate);
-        if (cleanCandidate.length < 3) return false;
-        return cleanCandidate === cleanSignature ||
-          cleanCandidate.includes(cleanSignature) ||
-          cleanSignature.includes(cleanCandidate);
-      });
-
-      if (match) {
-        return {
-          state: "live",
-          isLive: true,
-          djName: dj.djName || "DJ ao vivo",
-          programName: dj.programName || "Programa Ao Vivo",
-          matchedSignature: signature,
-          detectedValue: normalizePublicText(match),
-          source: "dj",
-        };
-      }
-    }
-  }
-
-  return {
-    state: "online",
-    isLive: false,
-    djName: null,
-    programName: null,
-    matchedSignature: null,
-    detectedValue: null,
-    source: "autodj",
-  };
+    {
+      id: "history-safe-programming",
+      time: "agora",
+      title: track.title,
+      artist: track.artist,
+      raw: track.raw,
+      isCurrent: true,
+    },
+  ];
 }
 
 function parseCells(rowHtml) {
@@ -617,37 +621,87 @@ function parseChatMessages(html) {
 }
 
 async function handleNowPlaying() {
-  const liveStatusTest = await getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true })
-    .catch(() => ({ state: "off" }));
+  const [liveStatusTest, configuredLiveDj] = await Promise.all([
+    getLiveStatusTest().catch(() => ({ state: "off" })),
+    getCurrentLiveDjStatus().catch(() => null),
+  ]);
 
-  try {
-    const { stats, track } = await fetchServerMetadata();
+  if (configuredLiveDj?.isLive) {
     return json(200, applyLiveStatusSimulation({
       ok: true,
       source: "live",
-      track,
-      stats: {
-        listeners: Number(stats.currentlisteners ?? 0),
-        peakListeners: Number(stats.peaklisteners ?? 0),
-        uniqueListeners: Number(stats.uniquelisteners ?? 0),
-        streamHits: Number(stats.streamhits ?? 0),
-        genre: stats.servergenre ?? "Reggae",
-        bitrate: stats.bitrate ?? "128",
-        isOnline: Number(stats.streamstatus ?? 0) === 1,
-        uptimeSeconds: Number(stats.streamuptime ?? 0) || null,
-        streamSource: stats.streamsource ?? stats.source ?? null,
+      track: {
+        artist: configuredLiveDj.djName || "DJ ao vivo",
+        title: configuredLiveDj.programName || "Programa Ao Vivo",
+        raw: `${configuredLiveDj.djName || "DJ ao vivo"} - ${configuredLiveDj.programName || "Programa Ao Vivo"}`,
+        album: null,
+        coverUrl: configuredLiveDj.logoUrl || null,
       },
-      liveDj: resolveLiveDjStatus(stats, track.raw, []),
-      history: [],
+      stats: {
+        listeners: 0,
+        peakListeners: 0,
+        uniqueListeners: 0,
+        streamHits: 0,
+        genre: "Reggae",
+        bitrate: "128",
+        isOnline: true,
+        uptimeSeconds: null,
+        streamSource: "programação de DJ",
+      },
+      liveDj: configuredLiveDj,
+      history: safeHistoryFallback(),
+      fetchedAt: new Date().toISOString(),
+    }, liveStatusTest), liveDjNowPlayingCacheHeaders);
+  }
+
+  try {
+    const metadata = await fetchPrimaryStreamMetadata();
+
+    return json(200, applyLiveStatusSimulation({
+      ok: true,
+      source: "live",
+      track: trackFromPrimaryMetadata(metadata),
+      stats: {
+        listeners: metadata.listeners,
+        peakListeners: metadata.listeners,
+        uniqueListeners: metadata.listeners,
+        streamHits: 0,
+        genre: metadata.genre,
+        bitrate: metadata.bitrate,
+        isOnline: metadata.isOnline,
+        uptimeSeconds: null,
+        streamSource: "API da rádio",
+      },
+      liveDj: {
+        state: metadata.isOnline ? "online" : "offline",
+        isLive: false,
+        djName: null,
+        programName: null,
+        matchedSignature: null,
+        detectedValue: null,
+        source: "metadata",
+      },
+      history: safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
     }, liveStatusTest), nowPlayingCacheHeaders);
   } catch {
     try {
       const stats = await fetchStreamStats();
-      const track = { ...parseSourceTrack(stats.songtitle ?? ""), coverUrl: null };
+      const rawSongTitle = stats.songtitle ?? "";
+      const liveDj = {
+        state: Number(stats.streamstatus ?? 0) === 1 ? "online" : "offline",
+        isLive: false,
+        djName: null,
+        programName: null,
+        matchedSignature: null,
+        detectedValue: null,
+        source: "autodj",
+      };
+      const track = trackFromShoutcastFallback(rawSongTitle);
+
       return json(200, applyLiveStatusSimulation({
         ok: true,
-        source: "fallback",
+        source: "live",
         track,
         stats: {
           listeners: Number(stats.currentlisteners ?? 0),
@@ -660,15 +714,19 @@ async function handleNowPlaying() {
           uptimeSeconds: Number(stats.streamuptime ?? 0) || null,
           streamSource: stats.streamsource ?? stats.source ?? null,
         },
-        liveDj: resolveLiveDjStatus(stats, track.raw, []),
-        history: [],
+        liveDj,
+        history: safeHistoryFallback(),
         fetchedAt: new Date().toISOString(),
       }, liveStatusTest), nowPlayingCacheHeaders);
     } catch {
       return json(200, applyLiveStatusSimulation({
         ok: false,
         source: "fallback",
-        track: { ...parseSourceTrack(""), coverUrl: null },
+        track: {
+          ...parseTrack(SAFE_NOW_PLAYING),
+          album: null,
+          coverUrl: null,
+        },
         stats: {
           listeners: 0,
           peakListeners: 0,
@@ -676,12 +734,12 @@ async function handleNowPlaying() {
           streamHits: 0,
           genre: "Reggae",
           bitrate: "128",
-          isOnline: false,
+          isOnline: true,
           uptimeSeconds: null,
           streamSource: null,
         },
         liveDj: {
-          state: "offline",
+          state: "connecting",
           isLive: false,
           djName: null,
           programName: null,
@@ -689,11 +747,117 @@ async function handleNowPlaying() {
           detectedValue: null,
           source: "fallback",
         },
-        history: [],
+        history: safeHistoryFallback(),
         fetchedAt: new Date().toISOString(),
         message: "Dados ao vivo indisponíveis no momento.",
       }, liveStatusTest), nowPlayingCacheHeaders);
     }
+  }
+}
+
+function liveStateCacheHeaders(snapshot) {
+  const configuredSeconds = snapshot?.config?.enabled && snapshot?.eligibleDj
+    ? Number(snapshot.config.pollSeconds) || 15
+    : 60;
+  const boundary = snapshot?.sessionEndsAt || snapshot?.nextEligibleAt;
+  const untilBoundary = boundary ? Math.max(1, Math.ceil((Date.parse(boundary) - Date.now()) / 1_000)) : configuredSeconds;
+  const pollSeconds = Math.max(1, Math.min(configuredSeconds, untilBoundary));
+  return publicCacheHeaders({
+    browserMaxAge: pollSeconds,
+    cdnMaxAge: pollSeconds,
+    staleWhileRevalidate: 0,
+  });
+}
+
+function publicLiveStatePayload(snapshot) {
+  const state = snapshot?.state || {};
+  const eligibleDj = snapshot?.eligibleDj;
+  return {
+    ok: true,
+    liveDj: snapshot?.liveDj || null,
+    eligibleDj: eligibleDj
+      ? {
+          id: eligibleDj.id,
+          djName: eligibleDj.djName,
+          programName: eligibleDj.programName,
+          startTime: eligibleDj.startTime,
+          endTime: eligibleDj.endTime,
+        }
+      : null,
+    state: {
+      mode: state.mode || "waiting",
+      djId: state.djId || null,
+      enterCount: Number(state.enterCount || 0),
+      exitCount: Number(state.exitCount || 0),
+      classification: state.classification || null,
+      source: state.source || "none",
+      observedAt: state.observedAt || null,
+      updatedAt: state.updatedAt || null,
+    },
+    config: {
+      enabled: snapshot?.config?.enabled !== false,
+      pollSeconds: Number(snapshot?.config?.pollSeconds) || 15,
+      enterConfirmations: Number(snapshot?.config?.enterConfirmations) || 3,
+      exitConfirmations: Number(snapshot?.config?.exitConfirmations) || 2,
+    },
+    nextEligibleAt: snapshot?.nextEligibleAt || null,
+    sessionEndsAt: snapshot?.sessionEndsAt || null,
+    version: state.updatedAt || snapshot?.liveDj?.sessionId || "waiting",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+function adminDjDetectionPayload(snapshot) {
+  const payload = publicLiveStatePayload(snapshot);
+  return {
+    ...payload,
+    diagnostic: snapshot?.diagnostic || {
+      classification: snapshot?.state?.classification || "unknown",
+      source: snapshot?.state?.source || "none",
+      observedAt: snapshot?.state?.observedAt || null,
+      latencyMs: snapshot?.state?.latencyMs || null,
+      lastError: snapshot?.state?.lastError || null,
+    },
+  };
+}
+
+async function evaluateDjDetection({ probe = false } = {}) {
+  let snapshot = await getDjDetectionSnapshot();
+  const manualIsLive = snapshot.liveDj?.source === "manual";
+  const shouldObserve = Boolean(snapshot.config?.enabled && snapshot.eligibleDj && !manualIsLive);
+
+  if (shouldObserve || (probe && snapshot.config?.enabled && snapshot.eligibleDj && !manualIsLive)) {
+    snapshot = await advanceDjDetectionObservation(await fetchDjDetectionObservation());
+  } else if (!snapshot.liveDj?.isLive && !snapshot.eligibleDj && snapshot.state?.mode !== "waiting") {
+    snapshot = await advanceDjDetectionObservation({
+      classification: "unknown",
+      source: "none",
+      observedAt: new Date().toISOString(),
+      latencyMs: null,
+      lastError: null,
+    });
+  }
+
+  return snapshot;
+}
+
+async function handlePublicLiveState() {
+  try {
+    const snapshot = await evaluateDjDetection();
+    return json(200, publicLiveStatePayload(snapshot), liveStateCacheHeaders(snapshot));
+  } catch {
+    return json(200, {
+      ok: false,
+      liveDj: null,
+      eligibleDj: null,
+      state: { mode: "waiting", djId: null, enterCount: 0, exitCount: 0, classification: "unknown", source: "none", observedAt: null, updatedAt: null },
+      config: { enabled: true, pollSeconds: 60, enterConfirmations: 3, exitConfirmations: 2 },
+      nextEligibleAt: null,
+      sessionEndsAt: null,
+      version: "unavailable",
+      fetchedAt: new Date().toISOString(),
+      message: "Estado ao vivo indisponível.",
+    }, publicCacheHeaders({ browserMaxAge: 60, cdnMaxAge: 60, staleWhileRevalidate: 0 }));
   }
 }
 
@@ -703,16 +867,16 @@ async function handleRecentTracks() {
     return json(200, {
       ok: true,
       source: "live",
-      history,
+      history: history.length > 0 ? history : safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
     }, recentTracksCacheHeaders);
   } catch {
     return json(200, {
       ok: false,
       source: "fallback",
-      history: [],
+      history: safeHistoryFallback(),
       fetchedAt: new Date().toISOString(),
-      message: "Histórico indisponível no momento.",
+      message: "Faixas recentes indisponíveis no momento.",
     }, recentTracksCacheHeaders);
   }
 }
@@ -924,6 +1088,31 @@ async function handleAds(event, pathname) {
     }
   }
 
+  if (pathname === "/ads/import-image") {
+    if (method !== "POST") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const payload = readJsonBody(event);
+      const image = await importSiteImage(payload);
+      return json(200, { ok: true, image });
+    } catch (error) {
+      return serverError(error, "Não foi possível importar e converter a imagem.");
+    }
+  }
+
+  if (pathname === "/ads/migrate-webp") {
+    if (method !== "POST") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const result = await migrateStoredMediaToWebp();
+      return json(200, { ok: true, ...result });
+    } catch (error) {
+      return serverError(error, "Não foi possível migrar as imagens para WebP.");
+    }
+  }
+
   if (parts[0] === "ads" && parts[2] === "stats") {
     if (method !== "POST") return methodNotAllowed();
 
@@ -1071,6 +1260,19 @@ async function handleDjs(event, pathname) {
   const method = event.httpMethod || "GET";
   const parts = pathname.split("/").filter(Boolean);
 
+  if (pathname === "/djs/upload-logo") {
+    if (method !== "POST") return methodNotAllowed();
+    if (!isAdminRequest(event)) return unauthorized();
+
+    try {
+      const payload = readJsonBody(event);
+      const image = await saveDjLogo(payload);
+      return json(200, { ok: true, image });
+    } catch (error) {
+      return serverError(error, "Não foi possível enviar a logo do DJ.");
+    }
+  }
+
   if (pathname === "/djs") {
     if (!isAdminRequest(event)) return unauthorized();
 
@@ -1104,6 +1306,17 @@ async function handleDjs(event, pathname) {
   if (parts[0] === "djs" && parts[1]) {
     if (!isAdminRequest(event)) return unauthorized();
 
+    if (parts[2] === "skip-today") {
+      if (method !== "PUT") return methodNotAllowed();
+      try {
+        const payload = readJsonBody(event);
+        const liveStatusTest = await setDjSkippedToday(parts[1], payload.skipped !== false);
+        return json(200, { ok: true, liveStatusTest, fetchedAt: new Date().toISOString() });
+      } catch (error) {
+        return serverError(error, "Não foi possível pular a sessão de hoje.");
+      }
+    }
+
     if (method === "PUT") {
       try {
         const payload = readJsonBody(event);
@@ -1133,16 +1346,13 @@ async function handleLiveStatusTest(event, pathname) {
 
   if (method === "GET") {
     try {
-      const adminMode = isAdminRequest(event);
-      const liveStatusTest = adminMode
-        ? await getLiveStatusTest({ ensureTable: true, useCache: false })
-        : await getLiveStatusTest({ ensureTable: false, useCache: true, cacheOnly: true });
+      const liveStatusTest = await getLiveStatusTest();
       return json(200, {
         ok: true,
         source: "blobs",
         liveStatusTest,
         fetchedAt: new Date().toISOString(),
-      }, adminMode ? {} : liveStatusCacheHeaders);
+      }, nowPlayingCacheHeaders);
     } catch (error) {
       return json(200, {
         ok: false,
@@ -1150,7 +1360,7 @@ async function handleLiveStatusTest(event, pathname) {
         liveStatusTest: { state: "off" },
         fetchedAt: new Date().toISOString(),
         message: error instanceof Error && error.message ? error.message : "Audiência indisponível.",
-      }, liveStatusCacheHeaders);
+      }, nowPlayingCacheHeaders);
     }
   }
 
@@ -1174,6 +1384,41 @@ async function handleLiveStatusTest(event, pathname) {
   return methodNotAllowed();
 }
 
+async function handleDjDetection(event, pathname) {
+  if (pathname !== "/dj-detection") return json(404, { ok: false, message: "Central da API não encontrada." });
+  if (!isAdminRequest(event)) return unauthorized();
+
+  const method = event.httpMethod || "GET";
+  if (method === "GET") {
+    const url = new URL(event.rawUrl || `https://local${event.path || "/api/dj-detection"}`);
+    const probe = url.searchParams.get("probe") === "1";
+    try {
+      const snapshot = probe ? await evaluateDjDetection({ probe: true }) : await getDjDetectionSnapshot();
+      return json(200, adminDjDetectionPayload(snapshot));
+    } catch (error) {
+      return serverError(error, "Não foi possível consultar a detecção de DJ.");
+    }
+  }
+
+  if (method === "PUT") {
+    try {
+      const payload = readJsonBody(event);
+      const current = await getLiveStatusTest();
+      const liveStatusTest = await saveLiveStatusTest({
+        ...current,
+        djDetectionConfig: payload.config ?? payload.djDetectionConfig ?? current.djDetectionConfig,
+        updatedAt: new Date().toISOString(),
+      });
+      const snapshot = await getDjDetectionSnapshot({ forceRefresh: true });
+      return json(200, { ok: true, liveStatusTest, ...adminDjDetectionPayload(snapshot) });
+    } catch (error) {
+      return serverError(error, "Não foi possível salvar o funcionamento da API.");
+    }
+  }
+
+  return methodNotAllowed();
+}
+
 export async function handler(event) {
   connectNetlifyBlobs(event);
 
@@ -1186,12 +1431,14 @@ export async function handler(event) {
   if (pathname === "/programs" || pathname.startsWith("/programs/")) return handlePrograms(event, pathname);
   if (pathname === "/djs" || pathname.startsWith("/djs/")) return handleDjs(event, pathname);
   if (pathname === "/live-status-test") return handleLiveStatusTest(event, pathname);
+  if (pathname === "/dj-detection") return handleDjDetection(event, pathname);
 
   if (event.httpMethod && event.httpMethod !== "GET") {
     return methodNotAllowed();
   }
 
   if (pathname === "/now-playing") return handleNowPlaying();
+  if (pathname === "/live-state") return handlePublicLiveState();
   if (pathname === "/recent-tracks") return handleRecentTracks();
   if (pathname === "/schedule") return handleSchedule();
   if (pathname === "/camera") return handleCamera();

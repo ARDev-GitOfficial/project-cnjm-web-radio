@@ -737,17 +737,49 @@ export function AdsAdminPage() {
       return;
     }
 
+    const sourceType = imageContentTypeForFile(file);
+    if (sourceType === "image/webp") {
+      try {
+        const size = await readImageSize(file);
+        if (size.width === AD_BANNER_WIDTH && size.height === AD_BANNER_HEIGHT && file.size <= PROGRAM_LOGO_MAX_SIZE) {
+          const dataUrl = await readFileAsDataUrl(file);
+          await applyCroppedAdImage({
+            fileName: toWebpMigrationFileName(file.name),
+            contentType: "image/webp",
+            width: size.width,
+            height: size.height,
+            dataUrl,
+            dataBase64: dataUrl.split(",")[1] || "",
+            size: file.size,
+            sourceWidth: size.width,
+            sourceHeight: size.height,
+            wasUpscaled: false,
+          }, true);
+          return;
+        }
+      } catch (error) {
+        setUploadState({
+          status: "error",
+          message: error instanceof Error ? error.message : "Não foi possível validar o WebP.",
+        });
+        return;
+      }
+    }
+
     setCropFile(file);
     setUploadState({ status: "checking", message: "Ajuste o corte antes de anexar o anúncio." });
   };
 
-  const applyCroppedAdImage = async (image: CroppedAdImage) => {
+  const applyCroppedAdImage = async (image: CroppedAdImage, isDirectWebp = false) => {
     if (!canEditAds) {
       setUploadState({ status: "error", message: "Conecte o conteúdo global antes de enviar imagens." });
       return;
     }
 
-    setUploadState({ status: "checking", message: "Enviando WebP otimizado..." });
+    setUploadState({
+      status: "checking",
+      message: isDirectWebp ? "Validando e enviando WebP sem reconverter..." : "Enviando WebP otimizado...",
+    });
 
     try {
       if (isRemote && session) {
@@ -773,7 +805,9 @@ export function AdsAdminPage() {
       setCropFile(null);
       setUploadState({
         status: "ready",
-        message: image.wasUpscaled
+        message: isDirectWebp
+          ? "WebP validado e anexado sem reconversão."
+          : image.wasUpscaled
           ? "Imagem anexada em 1700 x 450px. Atenção: houve ampliação e pode perder nitidez."
           : "Imagem cortada, otimizada e anexada ao anúncio.",
       });
@@ -1011,6 +1045,8 @@ export function AdsAdminPage() {
       if (!isAcceptedSourceImageType(sourceType)) throw new Error("Envie uma imagem PNG, JPG, WebP ou AVIF.");
       if (file.size > 5_000_000) throw new Error("A imagem de origem precisa ter até 5 MB.");
       const size = await readImageSize(file);
+      const isDirectWebp = sourceType === "image/webp" && size.width === 512 && size.height === 512;
+      if (isDirectWebp && file.size > PROGRAM_LOGO_MAX_SIZE) throw new Error("A logo WebP final precisa ter até 2,5 MB.");
 
       if (isRemote && session) {
         const dataUrl = await readFileAsDataUrl(file);
@@ -1042,7 +1078,10 @@ export function AdsAdminPage() {
           logoSize: image.size,
         }));
       }
-      setDjLogoUploadState({ status: "ready", message: "Logo quadrada convertida para WebP e anexada ao DJ." });
+      setDjLogoUploadState({
+        status: "ready",
+        message: isDirectWebp ? "Logo WebP anexada ao DJ sem reconversão." : "Logo quadrada convertida para WebP e anexada ao DJ.",
+      });
     } catch (error) {
       setDjLogoUploadState({
         status: "error",

@@ -1350,34 +1350,34 @@ export async function deleteProgram(id) {
 }
 
 export async function saveAdImage(payload) {
-  return storeOptimizedImage({
-    kind: "ad",
-    input: decodeImagePayload(payload),
-    fileName: payload?.fileName || "anuncio",
-  });
+  return storeImagePayload("ad", payload, "anuncio");
 }
 
 export async function saveProgramLogo(payload) {
-  return storeOptimizedImage({
-    kind: "program",
-    input: decodeImagePayload(payload),
-    fileName: payload?.fileName || "programa",
-  });
+  return storeImagePayload("program", payload, "programa");
 }
 
 export async function saveDjLogo(payload) {
-  return storeOptimizedImage({
-    kind: "dj",
-    input: decodeImagePayload(payload),
-    fileName: payload?.fileName || "dj",
-  });
+  return storeImagePayload("dj", payload, "dj");
 }
 
 export async function importSiteImage(payload) {
   const kind = normalizeMediaKind(payload?.kind);
   const sourceUrl = validateRemoteImageUrl(payload?.url);
   const input = await fetchRemoteImage(sourceUrl);
+  if (isWebpBuffer(input)) {
+    return storeExistingWebpImage({ kind, input, fileName: sourceUrl.pathname.split("/").pop() || kind });
+  }
   return storeOptimizedImage({ kind, input, fileName: sourceUrl.pathname.split("/").pop() || kind });
+}
+
+async function storeImagePayload(kind, payload, fallbackFileName) {
+  const input = decodeImagePayload(payload);
+  const fileName = payload?.fileName || fallbackFileName;
+  if (String(payload?.contentType || "").toLowerCase() === "image/webp") {
+    return storeExistingWebpImage({ kind, input, fileName });
+  }
+  return storeOptimizedImage({ kind, input, fileName });
 }
 
 function normalizeMediaKind(value) {
@@ -1453,12 +1453,104 @@ async function fetchRemoteImage(initialUrl) {
   throw new Error("A URL possui redirecionamentos demais.");
 }
 
-async function storeOptimizedImage({ kind, input, fileName }) {
-  const profile = {
+function mediaProfile(kind) {
+  return {
     ad: { width: AD_BANNER_WIDTH, height: AD_BANNER_HEIGHT, fit: "cover", quality: 84, prefix: "ad" },
     program: { width: PROGRAM_LOGO_MAX_DIMENSION, height: PROGRAM_LOGO_MAX_DIMENSION, fit: "inside", quality: 86, prefix: "program" },
     dj: { width: DJ_LOGO_SIZE, height: DJ_LOGO_SIZE, fit: "cover", quality: 86, prefix: "dj" },
   }[normalizeMediaKind(kind)];
+}
+
+function isWebpBuffer(input) {
+  return Buffer.isBuffer(input) &&
+    input.length >= 16 &&
+    input.toString("ascii", 0, 4) === "RIFF" &&
+    input.toString("ascii", 8, 12) === "WEBP";
+}
+
+function readWebpDimensions(input) {
+  if (!isWebpBuffer(input)) throw new Error("O arquivo informado não é um WebP válido.");
+
+  for (let offset = 12; offset + 8 <= input.length;) {
+    const chunk = input.toString("ascii", offset, offset + 4);
+    const length = input.readUInt32LE(offset + 4);
+    const dataOffset = offset + 8;
+    if (dataOffset + length > input.length) break;
+
+    if (chunk === "VP8X" && length >= 10) {
+      return {
+        width: input.readUIntLE(dataOffset + 4, 3) + 1,
+        height: input.readUIntLE(dataOffset + 7, 3) + 1,
+      };
+    }
+    if (chunk === "VP8L" && length >= 5 && input[dataOffset] === 0x2f) {
+      const bits = input.readUInt32LE(dataOffset + 1);
+      return {
+        width: (bits & 0x3fff) + 1,
+        height: ((bits >>> 14) & 0x3fff) + 1,
+      };
+    }
+    if (chunk === "VP8 " && length >= 10 && input[dataOffset + 3] === 0x9d && input[dataOffset + 4] === 0x01 && input[dataOffset + 5] === 0x2a) {
+      return {
+        width: input.readUInt16LE(dataOffset + 6) & 0x3fff,
+        height: input.readUInt16LE(dataOffset + 8) & 0x3fff,
+      };
+    }
+
+    offset = dataOffset + length + (length % 2);
+  }
+
+  throw new Error("Não foi possível identificar as dimensões do WebP.");
+}
+
+function assertDirectWebpProfile(kind, width, height) {
+  const profile = mediaProfile(kind);
+  if (!width || !height) throw new Error("WebP sem dimensões válidas.");
+  if (kind === "ad" && (width !== profile.width || height !== profile.height)) {
+    throw new Error(`O banner WebP precisa medir exatamente ${AD_BANNER_WIDTH} x ${AD_BANNER_HEIGHT}px.`);
+  }
+  if (kind === "dj" && (width !== DJ_LOGO_SIZE || height !== DJ_LOGO_SIZE)) {
+    throw new Error(`A logo WebP do DJ precisa medir exatamente ${DJ_LOGO_SIZE} x ${DJ_LOGO_SIZE}px.`);
+  }
+  if (kind === "program" && (width > PROGRAM_LOGO_MAX_DIMENSION || height > PROGRAM_LOGO_MAX_DIMENSION)) {
+    throw new Error(`A logo WebP precisa ter até ${PROGRAM_LOGO_MAX_DIMENSION}px de largura e altura.`);
+  }
+}
+
+async function persistWebpImage({ kind, data, width, height, fileName }) {
+  const profile = mediaProfile(kind);
+  if (!data.byteLength || data.byteLength > PROGRAM_LOGO_MAX_SIZE) {
+    throw new Error("A imagem WebP final precisa ter até 2,5 MB.");
+  }
+
+  const key = `${profile.prefix}-${Date.now()}-${randomUUID()}.webp`;
+  await adImageStore().set(key, data, {
+    metadata: {
+      contentType: "image/webp",
+      width,
+      height,
+      originalName: String(fileName || `${profile.prefix}.webp`),
+      kind,
+    },
+  });
+  return {
+    imageKey: key,
+    imageUrl: `/api/ads/image/${encodeURIComponent(key)}`,
+    imageWidth: width,
+    imageHeight: height,
+    imageContentType: "image/webp",
+    imageSize: data.byteLength,
+  };
+}
+
+async function storeExistingWebpImage({ kind, input, fileName }) {
+  const { width, height } = readWebpDimensions(input);
+  assertDirectWebpProfile(kind, width, height);
+  return persistWebpImage({ kind, data: input, width, height, fileName });
+}
+
+async function storeOptimizedImage({ kind, input, fileName }) {
+  const profile = mediaProfile(kind);
   const sharp = await loadSharp();
   const source = sharp(input, { animated: false, limitInputPixels: MAX_MEDIA_PIXELS }).rotate();
   const metadata = await source.metadata();
@@ -1470,28 +1562,13 @@ async function storeOptimizedImage({ kind, input, fileName }) {
     .resize(profile.width, profile.height, { fit: profile.fit, position: "centre", withoutEnlargement: kind === "program" })
     .webp({ quality: profile.quality, effort: 4 })
     .toBuffer({ resolveWithObject: true });
-  if (!output.data.byteLength || output.data.byteLength > PROGRAM_LOGO_MAX_SIZE) {
-    throw new Error("A imagem WebP final precisa ter até 2,5 MB.");
-  }
-
-  const key = `${profile.prefix}-${Date.now()}-${randomUUID()}.webp`;
-  await adImageStore().set(key, output.data, {
-    metadata: {
-      contentType: "image/webp",
-      width: output.info.width,
-      height: output.info.height,
-      originalName: String(fileName || `${profile.prefix}.webp`),
-      kind,
-    },
+  return persistWebpImage({
+    kind,
+    data: output.data,
+    width: output.info.width,
+    height: output.info.height,
+    fileName,
   });
-  return {
-    imageKey: key,
-    imageUrl: `/api/ads/image/${encodeURIComponent(key)}`,
-    imageWidth: output.info.width,
-    imageHeight: output.info.height,
-    imageContentType: "image/webp",
-    imageSize: output.data.byteLength,
-  };
 }
 
 export async function readAdImage(key) {

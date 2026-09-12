@@ -3,6 +3,7 @@ import {
   adminSessionPayload,
   applyLiveStatusSimulation,
   advanceDjDetectionObservation,
+  controlDjLiveSession,
   deleteAd,
   deleteDj,
   deleteProgram,
@@ -418,6 +419,28 @@ function classifyDjMetadata(songTitle) {
   return title && !isTechnicalTrack(title) ? "music" : "no-metadata";
 }
 
+function parseLiveDjMarker(value) {
+  const match = normalizePublicText(value).match(/^ao\s+vivo\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*$/i);
+  if (!match) return null;
+  const djName = normalizePublicText(match[1]);
+  const programName = normalizePublicText(match[2]);
+  return djName && programName ? { djName, programName } : null;
+}
+
+function isLiveDjMarker(value) {
+  return Boolean(parseLiveDjMarker(value));
+}
+
+function genericLiveTrack() {
+  return {
+    artist: "Web Rádio Conexão Jamaica",
+    title: "Reggae ao vivo",
+    raw: "Web Rádio Conexão Jamaica - Reggae ao vivo",
+    album: null,
+    coverUrl: null,
+  };
+}
+
 function publicDetectionError(error) {
   if (error instanceof Error && /abort/i.test(error.name || "")) return "Tempo limite ao consultar a rádio.";
   if (error instanceof Error && /^HTTP\s+\d+/i.test(error.message)) return "A rádio não respondeu à consulta de metadados.";
@@ -429,9 +452,13 @@ async function fetchDjDetectionObservation() {
 
   try {
     const metadata = await fetchPrimaryStreamMetadata();
+    const marker = parseLiveDjMarker(metadata.songTitle);
     return {
-      classification: classifyDjMetadata(metadata.songTitle),
+      classification: marker ? "no-metadata" : classifyDjMetadata(metadata.songTitle),
       source: "metadata",
+      songTitle: metadata.songTitle,
+      marker,
+      reason: marker ? "marker" : !normalizePublicText(metadata.songTitle) ? "empty" : isTechnicalTrack(metadata.songTitle) ? "technical" : "music",
       observedAt: new Date().toISOString(),
       latencyMs: Date.now() - startedAt,
       lastError: null,
@@ -439,9 +466,15 @@ async function fetchDjDetectionObservation() {
   } catch (primaryError) {
     try {
       const stats = await fetchStreamStats();
+      const songTitle = stats.songtitle ?? "";
+      const marker = parseLiveDjMarker(songTitle);
       return {
-        classification: classifyDjMetadata(stats.songtitle),
+        classification: marker ? "no-metadata" : classifyDjMetadata(songTitle),
         source: "shoutcast",
+        songTitle,
+        marker,
+        streamIdentity: `${stats.streamsource ?? ""}|${stats.streamuptime ?? ""}`,
+        reason: marker ? "marker" : !normalizePublicText(songTitle) ? "empty" : isTechnicalTrack(songTitle) ? "technical" : "music",
         observedAt: new Date().toISOString(),
         latencyMs: Date.now() - startedAt,
         lastError: null,
@@ -460,6 +493,7 @@ async function fetchDjDetectionObservation() {
 
 function trackFromPrimaryMetadata(metadata) {
   const rawValue = metadata.songTitle || SAFE_NOW_PLAYING;
+  if (isLiveDjMarker(rawValue)) return genericLiveTrack();
   const track = isTechnicalTrack(rawValue) ? parseTrack(SAFE_NOW_PLAYING) : parseTrack(rawValue);
   return {
     ...track,
@@ -469,6 +503,7 @@ function trackFromPrimaryMetadata(metadata) {
 }
 
 function trackFromShoutcastFallback(rawValue) {
+  if (isLiveDjMarker(rawValue)) return genericLiveTrack();
   const raw = normalizePublicText(rawValue) || SAFE_NOW_PLAYING;
   return {
     artist: "Web Rádio Conexão Jamaica",
@@ -756,7 +791,7 @@ async function handleNowPlaying() {
 }
 
 function liveStateCacheHeaders(snapshot) {
-  const configuredSeconds = snapshot?.config?.enabled && snapshot?.eligibleDj
+  const configuredSeconds = snapshot?.config?.enabled && (snapshot?.eligibleDj || snapshot?.liveDj?.isLive)
     ? Number(snapshot.config.pollSeconds) || 15
     : 60;
   const boundary = snapshot?.sessionEndsAt || snapshot?.nextEligibleAt;
@@ -789,8 +824,16 @@ function publicLiveStatePayload(snapshot) {
       djId: state.djId || null,
       enterCount: Number(state.enterCount || 0),
       exitCount: Number(state.exitCount || 0),
+      confidence: Number(state.confidence || 0),
+      activation: state.activation || null,
       classification: state.classification || null,
       source: state.source || "none",
+      expectedEndAt: state.expectedEndAt || snapshot?.expectedEndAt || null,
+      overrunAcknowledgedAt: state.overrunAcknowledgedAt || null,
+      forceEnded: state.forceEnded === true,
+      titleStale: state.titleStale === true,
+      streamChanged: state.streamChanged === true,
+      signals: Array.isArray(state.signals) ? state.signals : [],
       observedAt: state.observedAt || null,
       updatedAt: state.updatedAt || null,
     },
@@ -802,6 +845,8 @@ function publicLiveStatePayload(snapshot) {
     },
     nextEligibleAt: snapshot?.nextEligibleAt || null,
     sessionEndsAt: snapshot?.sessionEndsAt || null,
+    expectedEndAt: snapshot?.expectedEndAt || null,
+    isOverrun: snapshot?.isOverrun === true,
     version: state.updatedAt || snapshot?.liveDj?.sessionId || "waiting",
     fetchedAt: new Date().toISOString(),
   };
@@ -817,6 +862,8 @@ function adminDjDetectionPayload(snapshot) {
       observedAt: snapshot?.state?.observedAt || null,
       latencyMs: snapshot?.state?.latencyMs || null,
       lastError: snapshot?.state?.lastError || null,
+      confidence: Number(snapshot?.state?.confidence || 0),
+      signals: Array.isArray(snapshot?.state?.signals) ? snapshot.state.signals : [],
     },
   };
 }
@@ -824,11 +871,17 @@ function adminDjDetectionPayload(snapshot) {
 async function evaluateDjDetection({ probe = false } = {}) {
   let snapshot = await getDjDetectionSnapshot();
   const manualIsLive = snapshot.liveDj?.source === "manual";
-  const shouldObserve = Boolean(snapshot.config?.enabled && snapshot.eligibleDj && !manualIsLive);
+  const confirmationNeedsMonitoring = snapshot.state?.activation === "confirmation" && snapshot.liveDj?.isLive;
+  const shouldObserve = Boolean(
+    snapshot.eligibleDj &&
+    !manualIsLive &&
+    (snapshot.config?.enabled || confirmationNeedsMonitoring) &&
+    (probe || isDjDetectionDue(snapshot)),
+  );
 
-  if (shouldObserve || (probe && snapshot.config?.enabled && snapshot.eligibleDj && !manualIsLive)) {
+  if (shouldObserve) {
     snapshot = await advanceDjDetectionObservation(await fetchDjDetectionObservation());
-  } else if (!snapshot.liveDj?.isLive && !snapshot.eligibleDj && snapshot.state?.mode !== "waiting") {
+  } else if (!snapshot.liveDj?.isLive && !snapshot.eligibleDj && (snapshot.state?.mode !== "waiting" || snapshot.state?.djId)) {
     snapshot = await advanceDjDetectionObservation({
       classification: "unknown",
       source: "none",
@@ -839,6 +892,14 @@ async function evaluateDjDetection({ probe = false } = {}) {
   }
 
   return snapshot;
+}
+
+function isDjDetectionDue(snapshot) {
+  const observedAt = Date.parse(snapshot?.state?.observedAt || "");
+  const intervalMs = (Number(snapshot?.config?.pollSeconds) || 15) * 1_000;
+  return !Number.isFinite(observedAt) ||
+    snapshot?.state?.djId !== snapshot?.eligibleDj?.id ||
+    Date.now() - observedAt >= intervalMs;
 }
 
 async function handlePublicLiveState() {
@@ -854,6 +915,8 @@ async function handlePublicLiveState() {
       config: { enabled: true, pollSeconds: 60, enterConfirmations: 3, exitConfirmations: 2 },
       nextEligibleAt: null,
       sessionEndsAt: null,
+      expectedEndAt: null,
+      isOverrun: false,
       version: "unavailable",
       fetchedAt: new Date().toISOString(),
       message: "Estado ao vivo indisponível.",
@@ -1314,6 +1377,17 @@ async function handleDjs(event, pathname) {
         return json(200, { ok: true, liveStatusTest, fetchedAt: new Date().toISOString() });
       } catch (error) {
         return serverError(error, "Não foi possível pular a sessão de hoje.");
+      }
+    }
+
+    if (parts[2] === "session") {
+      if (method !== "PUT") return methodNotAllowed();
+      try {
+        const payload = readJsonBody(event);
+        const snapshot = await controlDjLiveSession(parts[1], payload.action, payload.minutes);
+        return json(200, { ok: true, ...adminDjDetectionPayload(snapshot) });
+      } catch (error) {
+        return serverError(error, "Não foi possível atualizar a sessão do DJ.");
       }
     }
 

@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  FileText,
   HardDrive,
   ImageUp,
   Lock,
@@ -32,6 +33,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Navigate, NavLink, useLocation } from "react-router-dom";
 import { AdImageCropper, type CroppedAdImage } from "../components/AdImageCropper";
+import { AudienceReportPanel } from "../components/AudienceReportPanel";
 import {
   AD_BANNER_HEIGHT,
   AD_BANNER_WIDTH,
@@ -81,6 +83,7 @@ import {
   emptyAudienceDjProfile,
   emptyAudienceScheduleProfile,
   defaultLiveDjControl,
+  controlRemoteDjSession,
   emptyManualLiveDjSchedule,
   fetchAdminDjs,
   fetchDjDetectionStatus,
@@ -136,6 +139,12 @@ type ConversionState = UploadState & {
   total: number;
 };
 
+type VisitorCounterDraft = {
+  visitorBase: number;
+  visitorTarget: number | null;
+  visitorGrowthPercent: number;
+};
+
 // Legacy schedule payloads remain readable until the authenticated migration rewrites them into DJ records.
 type DjScheduleDraft = {
   enabled: boolean;
@@ -144,7 +153,7 @@ type DjScheduleDraft = {
   endTime: string;
 };
 
-type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits" | "api";
+type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits" | "reports" | "api";
 type AdminResource = "ads" | "programs" | "djs" | "audience" | "detection";
 type AdminActivityStatus = "saving" | "confirming" | "complete" | "error";
 
@@ -162,6 +171,7 @@ const adminPanelRoutes: Record<AdminPanel, string> = {
   programs: "/ads/programacao",
   djs: "/ads/djs",
   visits: "/ads/visitas",
+  reports: "/ads/relatorios",
   api: "/ads/api",
 };
 
@@ -178,6 +188,43 @@ const localAdminPayload = (message?: string): AdsPayload => ({
 
 const localProgramPayload = (message?: string): ProgramsPayload => localProgramsPayload(message);
 
+function visitorCounterDraftFrom(payload: Partial<LiveStatusTestPayload>): VisitorCounterDraft {
+  const normalized = normalizeLiveStatusTest(payload);
+  return {
+    visitorBase: normalized.visitorBase ?? normalized.visitors ?? LIVE_TEST_DEFAULT_VISITORS,
+    visitorTarget: normalized.visitorTarget ?? null,
+    visitorGrowthPercent: Math.max(1, normalized.visitorGrowthPercent ?? normalized.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH),
+  };
+}
+
+function visitorCounterFields(payload: Partial<LiveStatusTestPayload>): Partial<LiveStatusTestPayload> {
+  const normalized = normalizeLiveStatusTest(payload);
+  return {
+    visitors: normalized.visitors,
+    visitorBase: normalized.visitorBase,
+    visitorTarget: normalized.visitorTarget,
+    growthPercent: normalized.visitorGrowthPercent,
+    visitorGrowthPercent: normalized.visitorGrowthPercent,
+    rampFromVisitors: normalized.rampFromVisitors,
+    visitorAppliedAt: normalized.visitorAppliedAt,
+  };
+}
+
+function onlineAudienceFields(payload: Partial<LiveStatusTestPayload>) {
+  const normalized = normalizeLiveStatusTest(payload);
+  const {
+    visitors: _visitors,
+    visitorBase: _visitorBase,
+    visitorTarget: _visitorTarget,
+    growthPercent: _growthPercent,
+    visitorGrowthPercent: _visitorGrowthPercent,
+    rampFromVisitors: _rampFromVisitors,
+    visitorAppliedAt: _visitorAppliedAt,
+    ...online
+  } = normalized;
+  return online;
+}
+
 const localDjPayload = (message?: string): DjsPayload => localDjsPayload(message);
 
 function panelFromPath(pathname: string): AdminPanel | null {
@@ -187,6 +234,7 @@ function panelFromPath(pathname: string): AdminPanel | null {
   if (cleanPath === "/ads/programacao") return "programs";
   if (cleanPath === "/ads/djs") return "djs";
   if (cleanPath === "/ads/visitas") return "visits";
+  if (cleanPath === "/ads/relatorios") return "reports";
   if (cleanPath === "/ads/api") return "api";
   return null;
 }
@@ -198,8 +246,8 @@ export function AdsAdminPage() {
   const isDashboard = activePanel === "dashboard";
   const shouldLoadAds = isDashboard || activePanel === "ads";
   const shouldLoadPrograms = isDashboard || activePanel === "programs";
-  const shouldLoadDjs = isDashboard || activePanel === "djs" || activePanel === "api";
-  const shouldLoadAudience = isDashboard || activePanel === "visits" || activePanel === "djs" || activePanel === "api";
+  const shouldLoadDjs = isDashboard || activePanel === "djs" || activePanel === "reports" || activePanel === "api";
+  const shouldLoadAudience = isDashboard || activePanel === "visits" || activePanel === "reports" || activePanel === "djs" || activePanel === "api";
   const [session, setSession] = useState<AdminSession | null>(() => getAdminSession());
   const [loginForm, setLoginForm] = useState<LoginForm>({ login: "", password: "" });
   const [loginError, setLoginError] = useState("");
@@ -222,6 +270,7 @@ export function AdsAdminPage() {
   const [djLogoUploadState, setDjLogoUploadState] = useState<UploadState>({ status: "idle", message: "" });
   const [liveTest, setLiveTest] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [audienceDraft, setAudienceDraft] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
+  const [visitorDraft, setVisitorDraft] = useState<VisitorCounterDraft>(() => visitorCounterDraftFrom(readLiveStatusTest()));
   const [djDetectionDraft, setDjDetectionDraft] = useState(() => normalizeDjDetectionConfig(readLiveStatusTest().djDetectionConfig));
   const [simulationNow, setSimulationNow] = useState(() => Date.now());
   const [activityLog, setActivityLog] = useState<AdminActivityItem[]>([]);
@@ -321,7 +370,7 @@ export function AdsAdminPage() {
   });
   const { data: djDetectionData, isFetching: isFetchingDjDetection } = useQuery({
     queryKey: ["dj-detection-admin", session?.token, session?.source],
-    enabled: Boolean(session?.source === "blobs" && (isDashboard || activePanel === "api")),
+    enabled: Boolean(session?.source === "blobs" && (isDashboard || activePanel === "api" || activePanel === "djs")),
     queryFn: async ({ signal }) => fetchDjDetectionStatus(session?.token || "", false, signal),
     staleTime: ADMIN_QUERY_STALE_TIME_MS,
     refetchOnWindowFocus: false,
@@ -384,18 +433,22 @@ export function AdsAdminPage() {
     [liveTest, savedConfiguredLiveDj, simulationNow],
   );
   const resolvedDraftMetrics = useMemo(
-    () => resolveLiveStatusTestMetrics(audienceDraft, simulationNow, { liveDj: draftConfiguredLiveDj }),
-    [audienceDraft, draftConfiguredLiveDj, simulationNow],
+    () => resolveLiveStatusTestMetrics({ ...audienceDraft, ...visitorDraft }, simulationNow, { liveDj: draftConfiguredLiveDj }),
+    [audienceDraft, draftConfiguredLiveDj, simulationNow, visitorDraft],
   );
   const activeAudienceProfile = useMemo(
     () => resolveLiveStatusAudienceProfile(audienceDraft, simulationNow, { liveDj: draftConfiguredLiveDj }),
     [audienceDraft, draftConfiguredLiveDj, simulationNow],
   );
-  const visitWaveBars = useMemo(() => makeVisitWaveBars(audienceDraft, simulationNow), [audienceDraft, simulationNow]);
+  const visitGrowthBars = useMemo(() => makeVisitGrowthBars(visitorDraft), [visitorDraft]);
   const isAudienceActive = liveTest.enabled !== false;
   const isAudienceDraftDirty = useMemo(
-    () => JSON.stringify(normalizeLiveStatusTest(audienceDraft)) !== JSON.stringify(normalizeLiveStatusTest(liveTest)),
+    () => JSON.stringify(onlineAudienceFields(audienceDraft)) !== JSON.stringify(onlineAudienceFields(liveTest)),
     [audienceDraft, liveTest],
+  );
+  const isVisitorDraftDirty = useMemo(
+    () => JSON.stringify(visitorDraft) !== JSON.stringify(visitorCounterDraftFrom(liveTest)),
+    [visitorDraft, liveTest],
   );
 
   useEffect(() => {
@@ -403,6 +456,7 @@ export function AdsAdminPage() {
     const normalized = normalizeLiveStatusTest(liveStatusData.liveStatusTest);
     setLiveTest(normalized);
     setAudienceDraft(normalized);
+    setVisitorDraft(visitorCounterDraftFrom(normalized));
     setDjDetectionDraft(normalizeDjDetectionConfig(normalized.djDetectionConfig));
     setSimulationNow(Date.now());
   }, [
@@ -419,6 +473,7 @@ export function AdsAdminPage() {
     liveStatusData?.liveStatusTest?.transitionPercent,
     liveStatusData?.liveStatusTest?.liveBoostPercent,
     liveStatusData?.liveStatusTest?.visitorGrowthPercent,
+    liveStatusData?.liveStatusTest?.visitorAppliedAt,
     liveStatusData?.liveStatusTest?.seed,
     liveStatusData?.liveStatusTest?.appliedAt,
     liveStatusData?.liveStatusTest?.updatedAt,
@@ -1122,6 +1177,7 @@ export function AdsAdminPage() {
       const normalized = normalizeLiveStatusTest(readLiveStatusTest());
       setLiveTest(normalized);
       setAudienceDraft(normalized);
+      setVisitorDraft(visitorCounterDraftFrom(normalized));
       setSimulationNow(Date.now());
       queryClient.setQueryData<LiveStatusTestResponse>(
         ["live-status-admin", session.token, session.source],
@@ -1182,6 +1238,46 @@ export function AdsAdminPage() {
     }
   };
 
+  const controlDjSession = async (
+    dj: StationDj,
+    action: "confirm" | "acknowledge" | "end" | "extend",
+    minutes?: 30 | 60 | 120,
+  ) => {
+    if (!session || session.source !== "blobs") {
+      setActionMessage("O controle da sessão exige o conteúdo global conectado.");
+      return;
+    }
+
+    const labels = {
+      confirm: "Confirmação de entrada do DJ",
+      acknowledge: "Continuidade do DJ",
+      end: "Encerramento da sessão do DJ",
+      extend: `Extensão de ${minutes || 30} minutos`,
+    };
+    const activityId = beginActivity(labels[action]);
+    setIsAudienceSaving(true);
+    try {
+      const liveState = await controlRemoteDjSession(session.token, dj.id, action, minutes);
+      setDjDetectionDiagnostic(liveState);
+      queryClient.setQueryData(["dj-detection-admin", session.token, session.source], liveState);
+      await queryClient.invalidateQueries({ queryKey: ["live-status-admin", session.token, session.source] });
+      setActionMessage(action === "confirm"
+        ? `${dj.djName} confirmado no ar. A saída seguirá o retorno confirmado do AutoDJ.`
+        : action === "end"
+          ? `${dj.djName} saiu do ar pelo painel.`
+          : action === "extend"
+            ? `Horário previsto estendido em ${minutes || 30} minutos.`
+            : "DJ mantido no ar até o retorno confirmado do AutoDJ.");
+      await confirmActivity(activityId, ["detection", "audience"], "Sessão atualizada");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível atualizar a sessão do DJ.";
+      setActionMessage(message);
+      failActivity(activityId, message);
+    } finally {
+      setIsAudienceSaving(false);
+    }
+  };
+
   const toggleDjSkipToday = async (dj: StationDj) => {
     if (!session || session.source !== "blobs") {
       setActionMessage("Pular somente hoje exige o conteúdo global conectado.");
@@ -1236,7 +1332,6 @@ export function AdsAdminPage() {
         updatedAt: now,
       },
       rampFromListeners: currentMetrics.listeners,
-      rampFromVisitors: currentMetrics.visitors,
       seed: nextSimulationSeed(),
       appliedAt: now,
       updatedAt: now,
@@ -1264,7 +1359,6 @@ export function AdsAdminPage() {
         updatedAt: now,
       },
       rampFromListeners: currentMetrics.listeners,
-      rampFromVisitors: currentMetrics.visitors,
       seed: nextSimulationSeed(),
       appliedAt: now,
       updatedAt: now,
@@ -1428,7 +1522,6 @@ export function AdsAdminPage() {
       enabled: true,
       liveDjControl: nextControl,
       rampFromListeners: currentMetrics.listeners,
-      rampFromVisitors: currentMetrics.visitors,
       seed: nextSimulationSeed(),
       appliedAt: now,
       updatedAt: now,
@@ -1455,12 +1548,10 @@ export function AdsAdminPage() {
     const listenersMax = normalizedDraft.listenersMax ?? listenersMin;
     const next = normalizeLiveStatusTest({
       ...normalizedDraft,
+      ...visitorCounterFields(liveTest),
       state: normalizedDraft.enabled ? "online" : "off",
       listeners: Math.round((listenersMin + listenersMax) / 2),
-      visitors: normalizedDraft.visitorBase ?? LIVE_TEST_DEFAULT_VISITORS,
-      growthPercent: normalizedDraft.visitorGrowthPercent,
       rampFromListeners: currentMetrics.listeners,
-      rampFromVisitors: currentMetrics.visitors,
       seed: nextSimulationSeed(),
       appliedAt: now,
       updatedAt: now,
@@ -1476,7 +1567,50 @@ export function AdsAdminPage() {
 
   const restoreAudienceDraft = () => {
     setAudienceDraft(normalizeLiveStatusTest(liveTest));
-    setActionMessage("Rascunho restaurado com os valores salvos.");
+    setActionMessage("Rascunho de ouvintes restaurado com os valores salvos.");
+  };
+
+  const applyVisitorDraft = async () => {
+    if (!canManageLiveMetrics) {
+      setActionMessage("Conecte o conteúdo global antes de alterar as visitas.");
+      return;
+    }
+
+    const currentMetrics = resolveLiveStatusTestMetrics(liveTest, Date.now(), { liveDj: savedConfiguredLiveDj });
+    const saved = normalizeLiveStatusTest(liveTest);
+    const now = new Date().toISOString();
+    const anchor = Math.max(
+      currentMetrics.visitors,
+      saved.visitorBase ?? 0,
+      saved.rampFromVisitors ?? 0,
+      visitorDraft.visitorBase,
+    );
+    const target = visitorDraft.visitorTarget && visitorDraft.visitorTarget > anchor
+      ? visitorDraft.visitorTarget
+      : null;
+    const next = normalizeLiveStatusTest({
+      ...saved,
+      visitors: anchor,
+      visitorBase: anchor,
+      visitorTarget: target,
+      growthPercent: visitorDraft.visitorGrowthPercent,
+      visitorGrowthPercent: visitorDraft.visitorGrowthPercent,
+      rampFromVisitors: anchor,
+      visitorAppliedAt: now,
+      updatedAt: now,
+    });
+
+    await persistAudienceConfig(
+      next,
+      session?.source === "blobs"
+        ? "Contador de visitas aplicado no site publicado."
+        : "Contador de visitas aplicado no teste local.",
+    );
+  };
+
+  const restoreVisitorDraft = () => {
+    setVisitorDraft(visitorCounterDraftFrom(liveTest));
+    setActionMessage("Rascunho de visitas restaurado com os valores salvos.");
   };
 
   const currentPanelResources: AdminResource[] = activePanel === "dashboard"
@@ -1487,6 +1621,8 @@ export function AdsAdminPage() {
         ? ["programs"]
         : activePanel === "djs"
           ? ["djs", "audience"]
+          : activePanel === "reports"
+            ? ["djs", "audience"]
           : activePanel === "api"
             ? ["djs", "audience", "detection"]
             : ["audience"];
@@ -1604,6 +1740,9 @@ export function AdsAdminPage() {
         </NavLink>
         <NavLink className={activePanel === "visits" ? "is-active" : ""} to={adminPanelRoutes.visits}>
           <UsersRound size={16} /> Audiência
+        </NavLink>
+        <NavLink className={activePanel === "reports" ? "is-active" : ""} to={adminPanelRoutes.reports}>
+          <FileText size={16} /> Relatórios
         </NavLink>
       </nav>
 
@@ -1802,7 +1941,7 @@ export function AdsAdminPage() {
               <div className="editor-head">
                 <div>
                   <span><Radio size={15} /> Diagnóstico sob demanda</span>
-                  <h2>{djDetectionStatus?.liveDj?.isLive ? "DJ ao vivo" : "Monitorando agenda"}</h2>
+                  <h2>{djDetectionStatus?.isOverrun ? "Horário excedido" : djDetectionStatus?.liveDj?.isLive ? "DJ ao vivo" : "Monitorando agenda"}</h2>
                 </div>
                 <button className="ghost-button" type="button" onClick={() => { void runDjDetectionDiagnostic(); }} disabled={session?.source !== "blobs" || isFetchingDjDetection}>
                   <RefreshCw size={16} /> Testar agora
@@ -1810,8 +1949,12 @@ export function AdsAdminPage() {
               </div>
               <div className="audience-rule-list">
                 <p><Mic2 size={15} /> Elegível: {djDetectionStatus?.eligibleDj ? `${djDetectionStatus.eligibleDj.djName} · ${djDetectionStatus.eligibleDj.programName}` : "nenhum DJ neste horário"}</p>
-                <p><Activity size={15} /> Estado: {djDetectionStatus?.state.mode || "aguardando"} · leitura {djDetectionStatus?.state.classification || "sem leitura"}</p>
+                <p><Activity size={15} /> Estado: {djDetectionStatus?.state.mode || "aguardando"} · confiança {djDetectionStatus?.state.confidence || 0}%</p>
+                <p><CheckCircle2 size={15} /> Leitura: {djDetectionStatus?.state.classification || "sem leitura"} · {djDetectionStatus?.state.activation || "automática"}</p>
                 <p><Database size={15} /> Origem: {djDetectionStatus?.diagnostic?.source || djDetectionStatus?.state.source || "nenhuma"} · {djDetectionStatus?.diagnostic?.latencyMs ?? djDetectionStatus?.state.latencyMs ?? "-"} ms</p>
+                {(djDetectionStatus?.diagnostic?.signals || djDetectionStatus?.state.signals || []).map((signal) => (
+                  <p key={signal}><CheckCircle2 size={15} /> {signal}</p>
+                ))}
                 {djDetectionStatus?.diagnostic?.lastError || djDetectionStatus?.state.lastError ? (
                   <p><AlertTriangle size={15} /> {djDetectionStatus?.diagnostic?.lastError || djDetectionStatus?.state.lastError}</p>
                 ) : null}
@@ -1820,6 +1963,14 @@ export function AdsAdminPage() {
             </aside>
           </section>
         </section>
+      ) : null}
+
+      {activePanel === "reports" ? (
+        <AudienceReportPanel
+          liveTest={liveTest}
+          liveDj={savedConfiguredLiveDj}
+          source={liveStatusData?.source || "fallback"}
+        />
       ) : null}
 
       {activePanel === "visits" ? (
@@ -1847,8 +1998,8 @@ export function AdsAdminPage() {
             </article>
             <article>
               <span><UsersRound size={15} /> Visitas</span>
-              <strong>{formatAdminNumber(resolvedDraftMetrics.visitors)}</strong>
-              <small>prévia do rascunho</small>
+              <strong>{formatAdminNumber(resolvedLiveMetrics.visitors)}</strong>
+              <small>contador publicado, sem retorno</small>
             </article>
             <article>
               <span><SlidersHorizontal size={15} /> Faixa ativa</span>
@@ -1869,7 +2020,7 @@ export function AdsAdminPage() {
                   <span>
                     <SlidersHorizontal size={15} /> Motor de audiência
                   </span>
-                  <h2>Base global</h2>
+                  <h2>Ouvintes online</h2>
                 </div>
               </div>
 
@@ -1906,33 +2057,6 @@ export function AdsAdminPage() {
                     value={audienceDraft.listenersMax ?? audienceDraft.listenersMin ?? LIVE_TEST_DEFAULT_LISTENERS}
                     onChange={(event) => updateAudienceDraft({
                       listenersMax: parseLiveMetric(event.currentTarget.value, audienceDraft.listenersMax ?? LIVE_TEST_DEFAULT_LISTENERS, LIVE_TEST_MAX_LISTENERS),
-                    })}
-                    disabled={!canManageLiveMetrics}
-                  />
-                </label>
-                <label>
-                  Visitas atuais
-                  <input
-                    type="number"
-                    min="0"
-                    max={LIVE_TEST_MAX_VISITORS}
-                    value={audienceDraft.visitorBase ?? audienceDraft.visitors ?? LIVE_TEST_DEFAULT_VISITORS}
-                    onChange={(event) => updateAudienceDraft({
-                      visitorBase: parseLiveMetric(event.currentTarget.value, audienceDraft.visitorBase ?? LIVE_TEST_DEFAULT_VISITORS, LIVE_TEST_MAX_VISITORS),
-                    })}
-                    disabled={!canManageLiveMetrics}
-                  />
-                </label>
-                <label>
-                  Meta de visitas
-                  <input
-                    type="number"
-                    min="0"
-                    max={LIVE_TEST_MAX_VISITORS}
-                    value={audienceDraft.visitorTarget ?? ""}
-                    placeholder="Opcional"
-                    onChange={(event) => updateAudienceDraft({
-                      visitorTarget: parseOptionalMetric(event.currentTarget.value, audienceDraft.visitorBase ?? LIVE_TEST_DEFAULT_VISITORS, LIVE_TEST_MAX_VISITORS),
                     })}
                     disabled={!canManageLiveMetrics}
                   />
@@ -1984,22 +2108,11 @@ export function AdsAdminPage() {
                     disabled={!canManageLiveMetrics}
                   />
                 </label>
-                <label>
-                  <span>Crescimento das visitas <strong>{audienceDraft.visitorGrowthPercent ?? audienceDraft.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH}%</strong></span>
-                  <input
-                    type="range"
-                    min="0"
-                    max={LIVE_TEST_MAX_GROWTH_PERCENT}
-                    value={audienceDraft.visitorGrowthPercent ?? audienceDraft.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH}
-                    onChange={(event) => updateAudienceDraft({ visitorGrowthPercent: parseLiveMetric(event.currentTarget.value, LIVE_TEST_DEFAULT_GROWTH, LIVE_TEST_MAX_GROWTH_PERCENT) })}
-                    disabled={!canManageLiveMetrics}
-                  />
-                </label>
               </div>
 
               <div className="audience-control-actions">
                 <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
-                  <Save size={16} /> {isAudienceSaving ? "Aplicando..." : isLiveMetricsRemote ? "Aplicar no site" : "Aplicar no local"}
+                  <Save size={16} /> {isAudienceSaving ? "Aplicando..." : isLiveMetricsRemote ? "Aplicar ouvintes" : "Aplicar ouvintes local"}
                 </button>
                 <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
                   <RefreshCw size={16} /> Descartar rascunho
@@ -2030,7 +2143,7 @@ export function AdsAdminPage() {
                 </div>
               </div>
               <div className="audience-wave-preview" aria-hidden="true">
-                {visitWaveBars.map((height, index) => (
+                {visitGrowthBars.map((height, index) => (
                   <span key={index} style={{ height: `${height}%` }} />
                 ))}
               </div>
@@ -2039,6 +2152,111 @@ export function AdsAdminPage() {
                 <p><TrendingUp size={15} /> Ao aplicar, os números caminham aos poucos até o novo comportamento.</p>
                 <p><Mic2 size={15} /> Quando um DJ for detectado, o perfil dele tem prioridade sobre o global.</p>
               </div>
+            </aside>
+          </section>
+
+          <section className="audience-admin-grid visit-counter-grid">
+            <form className="audience-control-panel" onSubmit={(event) => event.preventDefault()}>
+              <div className="editor-head">
+                <div>
+                  <span><TrendingUp size={15} /> Contador independente</span>
+                  <h2>Visitas</h2>
+                </div>
+              </div>
+
+              <div className="audience-field-grid">
+                <label>
+                  Valor para aumentar
+                  <input
+                    type="number"
+                    min="0"
+                    max={LIVE_TEST_MAX_VISITORS}
+                    value={visitorDraft.visitorBase}
+                    onChange={(event) => setVisitorDraft((current) => ({
+                      ...current,
+                      visitorBase: parseLiveMetric(event.currentTarget.value, current.visitorBase, LIVE_TEST_MAX_VISITORS),
+                    }))}
+                    disabled={!canManageLiveMetrics}
+                  />
+                </label>
+                <label>
+                  Meta inicial
+                  <input
+                    type="number"
+                    min={Math.max(resolvedLiveMetrics.visitors, visitorDraft.visitorBase)}
+                    max={LIVE_TEST_MAX_VISITORS}
+                    value={visitorDraft.visitorTarget ?? ""}
+                    placeholder="Opcional"
+                    onChange={(event) => setVisitorDraft((current) => ({
+                      ...current,
+                      visitorTarget: parseOptionalMetric(
+                        event.currentTarget.value,
+                        Math.max(resolvedLiveMetrics.visitors, current.visitorBase),
+                        LIVE_TEST_MAX_VISITORS,
+                      ),
+                    }))}
+                    disabled={!canManageLiveMetrics}
+                  />
+                </label>
+              </div>
+
+              <div className="audience-range-stack">
+                <label>
+                  <span>Ritmo de crescimento <strong>{visitorDraft.visitorGrowthPercent}%</strong></span>
+                  <input
+                    type="range"
+                    min="1"
+                    max={LIVE_TEST_MAX_GROWTH_PERCENT}
+                    value={visitorDraft.visitorGrowthPercent}
+                    onChange={(event) => setVisitorDraft((current) => ({
+                      ...current,
+                      visitorGrowthPercent: Math.max(1, parseLiveMetric(event.currentTarget.value, LIVE_TEST_DEFAULT_GROWTH, LIVE_TEST_MAX_GROWTH_PERCENT)),
+                    }))}
+                    disabled={!canManageLiveMetrics}
+                  />
+                </label>
+              </div>
+
+              <div className="audience-rule-list">
+                <p><TrendingUp size={15} /> O contador cresce continuamente e nunca desce por oscilação, DJ ou mudança de horário.</p>
+                <p><CheckCircle2 size={15} /> Um valor menor que o número publicado é ignorado para preservar a sequência.</p>
+                <p><Clock3 size={15} /> A meta acelera a chegada até ela; depois, o crescimento continua no ritmo escolhido.</p>
+              </div>
+
+              <div className="audience-control-actions">
+                <button className="play-main slim" type="button" onClick={applyVisitorDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
+                  <Save size={16} /> {isAudienceSaving ? "Aplicando..." : isLiveMetricsRemote ? "Aplicar visitas" : "Aplicar visitas local"}
+                </button>
+                <button className="ghost-button" type="button" onClick={restoreVisitorDraft} disabled={!canManageLiveMetrics || !isVisitorDraftDirty}>
+                  <RefreshCw size={16} /> Descartar rascunho
+                </button>
+              </div>
+            </form>
+
+            <aside className="audience-preview-panel visit-counter-preview">
+              <div className="editor-head">
+                <div>
+                  <span><Eye size={15} /> Contador publicado</span>
+                  <h2>{formatAdminNumber(resolvedDraftMetrics.visitors)}</h2>
+                </div>
+              </div>
+              <div className="audience-top-preview">
+                <span className="header-status is-online"><strong>CRESCENDO</strong></span>
+                <div>
+                  <small>Publicadas agora</small>
+                  <strong>{formatAdminNumber(resolvedLiveMetrics.visitors)}</strong>
+                </div>
+                <div>
+                  <small>Meta</small>
+                  <strong>{visitorDraft.visitorTarget ? formatAdminNumber(visitorDraft.visitorTarget) : "Contínua"}</strong>
+                </div>
+              </div>
+              <div className="audience-wave-preview visit-counter-bars" aria-hidden="true">
+                {visitGrowthBars.map((height, index) => (
+                  <span key={index} style={{ height: `${Math.max(24, height)}%` }} />
+                ))}
+              </div>
+              <small>A alteração só passa a valer quando você aplicar. O contador de visitas não é compartilhado com as regras de online.</small>
             </aside>
           </section>
 
@@ -2910,7 +3128,7 @@ export function AdsAdminPage() {
                 })}
               </div>
               <small>
-                No horário, este DJ fica elegível. O topo só entra em ao vivo após as confirmações da API ou por ativação manual.
+                No horário, este DJ fica elegível. O topo entra por marcador do encoder, confirmação do painel ou pelas leituras configuradas da API.
               </small>
             </div>
 
@@ -2969,7 +3187,7 @@ export function AdsAdminPage() {
                   placeholder={"Nome que possa aparecer no servidor\nNome do programa"}
                 />
               </label>
-              <small>Opcional. Use apenas se algum campo público do servidor passar um nome detectável.</small>
+              <small>Opcional. Para reconhecimento imediato, configure o encoder com: AO VIVO | {djDraft.djName || "Nome do DJ"} | {djDraft.programName || "Nome do programa"}.</small>
             </details>
 
             <button className="play-main slim" type="submit" disabled={!canEditAds}>
@@ -2993,6 +3211,34 @@ export function AdsAdminPage() {
                   const isManualLive = manualControlMatchesDj(savedLiveDjControl, dj);
                   const scheduleActive = dj.scheduleEnabled;
                   const isSkippedToday = Boolean((liveTest.djSkips || []).some((skip) => skip.djId === dj.id));
+                  const detectedState = djDetectionStatus?.state;
+                  const isCurrentDetectedDj = detectedState?.djId === dj.id;
+                  const isDetectedLive = Boolean(
+                    isCurrentDetectedDj &&
+                    (detectedState?.mode === "live" || detectedState?.mode === "leaving" || detectedState?.mode === "overrun"),
+                  );
+                  const isDetectedOverrun = Boolean(isDetectedLive && djDetectionStatus?.isOverrun);
+                  const detectionLabel = isManualLive
+                    ? "Ao vivo manual"
+                    : isDetectedOverrun
+                      ? "Ao vivo · horário excedido"
+                      : isDetectedLive
+                        ? detectedState?.mode === "leaving"
+                          ? "Ao vivo · confirmando saída"
+                          : detectedState?.activation === "marker"
+                            ? "Ao vivo · marcador do encoder"
+                            : detectedState?.activation === "confirmation"
+                              ? "Ao vivo · entrada confirmada"
+                              : "Ao vivo · detecção confirmada"
+                        : isCurrentDetectedDj && detectedState?.mode === "entering"
+                          ? `Confirmando entrada ${detectedState.enterCount}/${djDetectionStatus?.config.enterConfirmations || 3}`
+                          : isSkippedToday
+                            ? "Sessão de hoje ignorada"
+                            : scheduleActive
+                              ? "Aguardando confirmação da API"
+                              : dj.active
+                                ? "Ativo sem agenda"
+                                : "Desativado";
                   return (
                     <article key={dj.id} className={dj.active ? "ad-list-item dj-list-item is-active" : "ad-list-item dj-list-item"}>
                       <span className={isManualLive ? "dj-avatar is-live" : "dj-avatar"}>
@@ -3002,7 +3248,7 @@ export function AdsAdminPage() {
                         <strong>{dj.djName || "DJ sem nome"}</strong>
                         <span>{dj.programName || "Programa sem nome"}</span>
                         <small>
-                          {isManualLive ? "Ao vivo manual" : isSkippedToday ? "Sessão de hoje ignorada" : scheduleActive ? "Aguardando confirmação da API" : dj.active ? "Ativo sem agenda" : "Desativado"}
+                          {detectionLabel}
                         </small>
                       </div>
                       <span className={scheduleActive ? "dj-schedule-summary is-active" : "dj-schedule-summary"}>
@@ -3023,6 +3269,46 @@ export function AdsAdminPage() {
                         >
                           <Radio size={15} /> {isManualLive ? "Desligar manual" : "Ativar manualmente"}
                         </button>
+                        {!isManualLive && !isDetectedLive ? (
+                          <button
+                            type="button"
+                            onClick={() => { void controlDjSession(dj, "confirm"); }}
+                            disabled={session?.source !== "blobs" || isAudienceSaving || !dj.active}
+                            title="Confirma a entrada agora; o DJ continuará no ar até o AutoDJ voltar a ser confirmado."
+                          >
+                            <CheckCircle2 size={15} /> Confirmar entrada
+                          </button>
+                        ) : null}
+                        {isDetectedLive && !isManualLive ? (
+                          <button
+                            type="button"
+                            onClick={() => { void controlDjSession(dj, "end"); }}
+                            disabled={session?.source !== "blobs" || isAudienceSaving}
+                          >
+                            <Power size={15} /> Encerrar agora
+                          </button>
+                        ) : null}
+                        {isDetectedOverrun && !isManualLive ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => { void controlDjSession(dj, "acknowledge"); }}
+                              disabled={session?.source !== "blobs" || isAudienceSaving}
+                            >
+                              <CheckCircle2 size={15} /> Manter no ar
+                            </button>
+                            {[30, 60, 120].map((minutes) => (
+                              <button
+                                key={minutes}
+                                type="button"
+                                onClick={() => { void controlDjSession(dj, "extend", minutes as 30 | 60 | 120); }}
+                                disabled={session?.source !== "blobs" || isAudienceSaving}
+                              >
+                                <Clock3 size={15} /> +{minutes} min
+                              </button>
+                            ))}
+                          </>
+                        ) : null}
                         {scheduleActive ? (
                           <button
                             type="button"
@@ -3355,17 +3641,14 @@ function nextSimulationSeed() {
   return Math.max(1, Math.round(Date.now() % 999_999));
 }
 
-function makeVisitWaveBars(payload: LiveStatusTestPayload, nowMs: number) {
-  const movement = Number(payload.movementPercent ?? LIVE_TEST_DEFAULT_MOVEMENT) / 100;
-  const exit = Number(payload.exitPercent ?? LIVE_TEST_DEFAULT_EXIT) / 100;
-  const seed = Number(payload.seed ?? 731) / 97;
+function makeVisitGrowthBars(payload: VisitorCounterDraft) {
+  const growth = Math.max(1, payload.visitorGrowthPercent) / LIVE_TEST_MAX_GROWTH_PERCENT;
+  const targetBoost = payload.visitorTarget && payload.visitorTarget > payload.visitorBase ? 7 : 0;
 
   return Array.from({ length: 22 }, (_, index) => {
-    const point = nowMs / 760 + index * 0.78 + seed;
-    const wave = Math.sin(point) * 0.58 + Math.cos(point * 0.62) * 0.34;
-    const down = wave < 0 ? Math.abs(wave) * 18 * exit : 0;
-    const level = 40 + wave * 28 * Math.max(0.18, movement) - down + index * 0.48;
-    return Math.min(92, Math.max(18, Math.round(level)));
+    const steadyRise = 26 + index * (2.15 + growth * 1.8);
+    const contour = Math.sin(index * 0.88) * 4 + Math.cos(index * 0.31) * 2;
+    return Math.min(92, Math.max(18, Math.round(steadyRise + contour + targetBoost)));
   });
 }
 

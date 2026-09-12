@@ -268,7 +268,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const schedule = (liveState: DjLiveState) => {
       if (stopped || document.hidden) return;
-      const configuredDelay = liveState.config.enabled && liveState.eligibleDj
+      const configuredDelay = liveState.config.enabled && (liveState.eligibleDj || liveState.liveDj?.isLive)
         ? liveState.config.pollSeconds * 1_000
         : 60_000;
       const nextBoundary = liveState.sessionEndsAt || liveState.nextEligibleAt;

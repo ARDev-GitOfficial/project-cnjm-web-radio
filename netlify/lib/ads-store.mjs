@@ -26,6 +26,7 @@ const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
 const LIVE_TEST_STATES = new Set(["online", "connecting", "offline", "live", "off"]);
 const DJ_DETECTION_POLL_SECONDS = new Set([15, 30, 60]);
 const DJ_DETECTION_MAX_CONFIRMATIONS = 5;
+const DJ_TITLE_STALE_MS = 90 * 1000;
 const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const ADS_BLOB_STORE = "cnjm-ad-images";
 const CONTENT_BLOB_STORE = "cnjm-site-content";
@@ -582,6 +583,7 @@ export function normalizeLiveStatusPayload(payload = {}) {
     rampFromVisitors: normalizeRunCount(payload.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS),
     seed: normalizeRunCount(payload.seed, 731, 1, 999_999),
     appliedAt: normalizeIso(payload.appliedAt) || updatedAt,
+    visitorAppliedAt: normalizeIso(payload.visitorAppliedAt) || null,
     updatedAt,
     scheduleProfiles: normalizeAudienceScheduleProfiles(payload.scheduleProfiles),
     djProfiles: normalizeAudienceDjProfiles(payload.djProfiles),
@@ -619,8 +621,20 @@ function defaultDjDetectionState() {
     djId: null,
     enterCount: 0,
     exitCount: 0,
+    confidence: 0,
+    activation: null,
     classification: null,
     source: "none",
+    expectedEndAt: null,
+    overrunAcknowledgedAt: null,
+    forceEnded: false,
+    lastMusicFingerprint: null,
+    musicFingerprintSinceAt: null,
+    exitMusicFingerprint: null,
+    streamFingerprint: null,
+    titleStale: false,
+    streamChanged: false,
+    signals: [],
     observedAt: null,
     latencyMs: null,
     lastError: null,
@@ -630,18 +644,30 @@ function defaultDjDetectionState() {
 
 function normalizeDjDetectionState(value) {
   const item = value && typeof value === "object" ? value : {};
-  const mode = ["waiting", "entering", "live", "leaving"].includes(item.mode) ? item.mode : "waiting";
+  const mode = ["waiting", "entering", "live", "leaving", "overrun"].includes(item.mode) ? item.mode : "waiting";
   const classification = ["music", "no-metadata", "unknown"].includes(item.classification)
     ? item.classification
     : null;
-  const source = ["metadata", "shoutcast", "none"].includes(item.source) ? item.source : "none";
+  const source = ["metadata", "shoutcast", "marker", "confirmation", "none"].includes(item.source) ? item.source : "none";
   return {
     mode,
     djId: item.djId ? String(item.djId).trim() : null,
     enterCount: normalizeRunCount(item.enterCount, 0, 0, DJ_DETECTION_MAX_CONFIRMATIONS),
     exitCount: normalizeRunCount(item.exitCount, 0, 0, DJ_DETECTION_MAX_CONFIRMATIONS),
+    confidence: normalizeRunCount(item.confidence, 0, 0, 100),
+    activation: ["automatic", "marker", "confirmation"].includes(item.activation) ? item.activation : null,
     classification,
     source,
+    expectedEndAt: iso(item.expectedEndAt),
+    overrunAcknowledgedAt: iso(item.overrunAcknowledgedAt),
+    forceEnded: item.forceEnded === true,
+    lastMusicFingerprint: String(item.lastMusicFingerprint || "").trim().slice(0, 128) || null,
+    musicFingerprintSinceAt: iso(item.musicFingerprintSinceAt),
+    exitMusicFingerprint: String(item.exitMusicFingerprint || "").trim().slice(0, 128) || null,
+    streamFingerprint: String(item.streamFingerprint || "").trim().slice(0, 128) || null,
+    titleStale: item.titleStale === true,
+    streamChanged: item.streamChanged === true,
+    signals: Array.isArray(item.signals) ? item.signals.map(String).filter(Boolean).slice(0, 8) : [],
     observedAt: iso(item.observedAt),
     latencyMs: Number.isFinite(Number(item.latencyMs)) ? Math.max(0, Math.round(Number(item.latencyMs))) : null,
     lastError: String(item.lastError || "").trim().slice(0, 240) || null,
@@ -769,6 +795,7 @@ function serializeLiveStatus(row) {
     rampFromVisitors: row?.rampFromVisitors,
     seed: row?.seed,
     appliedAt: row?.appliedAt,
+    visitorAppliedAt: row?.visitorAppliedAt,
     updatedAt: row?.updatedAt,
     scheduleProfiles: row?.scheduleProfiles,
     djProfiles: row?.djProfiles,
@@ -904,17 +931,29 @@ export function resolveLiveStatusMetrics(payload, nowMs = Date.now(), liveDj = n
     LIVE_TEST_MAX_LISTENERS,
   );
 
+  // Visits are intentionally isolated from listener waves, DJ boosts, and schedules.
   const visitorBase = test.visitorBase ?? test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
-  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
-    ? test.visitorTarget
-    : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
-  const visitorGrowthMinutes = 4 + (1 - profile.visitorGrowthPercent / 100) * 24;
-  const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
   const rampFromVisitors = normalizeRunCount(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
-  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement) * visitorProgress;
+  const visitorAnchor = Math.max(visitorBase, rampFromVisitors);
+  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorAnchor
+    ? test.visitorTarget
+    : null;
+  const visitorGrowthPercent = Math.max(1, test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH);
+  const visitorStartedAt = test.visitorAppliedAt ? new Date(test.visitorAppliedAt).getTime() : Number.NaN;
+  const visitorElapsedMinutes = Number.isNaN(visitorStartedAt) ? 0 : Math.max(0, (nowMs - visitorStartedAt) / 60_000);
+  const targetDurationMinutes = 4 + (1 - visitorGrowthPercent / 100) * 24;
+  const targetProgress = visitorTarget ? easedProgress(visitorElapsedMinutes, targetDurationMinutes) : 0;
+  const targetValue = visitorTarget
+    ? visitorAnchor + (visitorTarget - visitorAnchor) * targetProgress
+    : visitorAnchor;
+  const ongoingMinutes = visitorTarget
+    ? Math.max(0, visitorElapsedMinutes - targetDurationMinutes)
+    : visitorElapsedMinutes;
+  const ongoingBase = visitorTarget ?? visitorAnchor;
+  const ongoingGrowth = ongoingBase * (visitorGrowthPercent / 100) * (ongoingMinutes / (24 * 60));
   const visitors = normalizeRunCount(
-    (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
-    visitorBase,
+    Math.max(visitorAnchor, targetValue + ongoingGrowth),
+    visitorAnchor,
     0,
     LIVE_TEST_MAX_VISITORS,
   );
@@ -933,7 +972,6 @@ export function resolveLiveStatusAudienceProfile(payload, nowMs = Date.now(), li
     exitPercent: test.exitPercent ?? LIVE_TEST_DEFAULT_EXIT,
     transitionPercent: test.transitionPercent ?? LIVE_TEST_DEFAULT_TRANSITION,
     liveBoostPercent: test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST,
-    visitorGrowthPercent: test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH,
   };
   if (liveDj?.isLive && Number.isFinite(Number(liveDj.listenersMin)) && Number.isFinite(Number(liveDj.listenersMax))) {
     const listenersMin = normalizeRunCount(liveDj.listenersMin, globalProfile.listenersMin, 0, LIVE_TEST_MAX_LISTENERS);
@@ -972,7 +1010,6 @@ export function resolveLiveStatusAudienceProfile(payload, nowMs = Date.now(), li
       movementPercent: scheduleProfile.movementPercent,
       exitPercent: scheduleProfile.exitPercent,
       transitionPercent: scheduleProfile.transitionPercent,
-      visitorGrowthPercent: scheduleProfile.visitorGrowthPercent,
     };
   }
 
@@ -1225,6 +1262,9 @@ export async function saveDj(payload) {
     }
     if (normalized.scheduleEnabled && hasDjScheduleConflict(content.djs, normalized)) {
       throw new Error("Já existe outro DJ ativo neste horário. Ajuste a agenda para não sobrepor transmissões.");
+    }
+    if (normalized.active && hasDjMarkerConflict(content.djs, normalized)) {
+      throw new Error("Já existe outro DJ ativo com o mesmo nome e programa do marcador ao vivo.");
     }
     previousLogoKey = current?.logoKey || "";
     savedDj = serializeDj(normalized);
@@ -1771,6 +1811,21 @@ function hasDjScheduleConflict(djs, candidate) {
     .some((dj) => schedulesOverlap(dj, candidate));
 }
 
+function hasDjMarkerConflict(djs, candidate) {
+  const candidateKey = djMarkerKey(candidate);
+  if (!candidateKey) return false;
+  return djs
+    .map(serializeDj)
+    .filter((dj) => dj.id !== candidate.id && dj.active)
+    .some((dj) => djMarkerKey(dj) === candidateKey);
+}
+
+function djMarkerKey(dj) {
+  const djName = comparableAudienceText(dj?.djName);
+  const programName = comparableAudienceText(dj?.programName);
+  return djName && programName ? `${djName}|${programName}` : "";
+}
+
 function schedulesOverlap(left, right) {
   return AUDIENCE_DAY_IDS.some((dayId) => {
     const leftWindows = scheduleWindowsForDay(left, dayId);
@@ -1874,7 +1929,6 @@ function normalizeAudienceScheduleProfiles(value) {
       movementPercent: normalizeRunCount(profile?.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
       exitPercent: normalizeRunCount(profile?.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
       transitionPercent: normalizeRunCount(profile?.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
-      visitorGrowthPercent: normalizeRunCount(profile?.visitorGrowthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
     };
   });
 }
@@ -1940,7 +1994,7 @@ export async function getDjDetectionSnapshot(options = {}) {
 export async function advanceDjDetectionObservation(observation = {}) {
   const nowMs = Number.isFinite(Number(observation.nowMs)) ? Number(observation.nowMs) : Date.now();
   const current = await readSiteContent({ forceRefresh: true });
-  const currentSnapshot = resolveDjDetectionSnapshot(current, nowMs);
+  const currentSnapshot = resolveDjDetectionSnapshot(current, nowMs, observation);
   const currentNextState = nextDjDetectionState(currentSnapshot, observation, nowMs);
   if (sameDjDetectionState(current.djDetectionState, currentNextState)) {
     return resolveDjDetectionSnapshot(current, nowMs, observation);
@@ -1949,7 +2003,7 @@ export async function advanceDjDetectionObservation(observation = {}) {
   let result = currentSnapshot;
 
   await updateSiteContent((content) => {
-    const snapshot = resolveDjDetectionSnapshot(content, nowMs);
+    const snapshot = resolveDjDetectionSnapshot(content, nowMs, observation);
     const nextState = nextDjDetectionState(snapshot, observation, nowMs);
     content.djDetectionState = nextState;
     result = resolveDjDetectionSnapshot(content, nowMs, observation);
@@ -1984,32 +2038,124 @@ export async function setDjSkippedToday(djId, skipped, nowMs = Date.now()) {
   return liveStatusTest;
 }
 
-function resolveDjDetectionSnapshot(content, nowMs, diagnostic = null) {
+export async function controlDjLiveSession(djId, action, minutes, nowMs = Date.now()) {
+  const requestedId = String(djId || "").trim();
+  const requestedAction = String(action || "").trim();
+  if (!requestedId) throw new Error("DJ inválido.");
+  if (!["confirm", "acknowledge", "end", "extend"].includes(requestedAction)) {
+    throw new Error("Ação de sessão inválida.");
+  }
+
+  let result = null;
+  await updateSiteContent((content) => {
+    const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
+    const djs = content.djs.map(serializeDj).filter((dj) => dj.active);
+    const dj = djs.find((item) => item.id === requestedId);
+    if (!dj) throw new Error("DJ não encontrado ou desativado.");
+    if (resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs)?.source === "manual") {
+      throw new Error("Desligue a ativação manual antes de controlar a confirmação automática.");
+    }
+
+    const current = normalizeDjDetectionState(content.djDetectionState);
+    const occurrence = djScheduleOccurrence(dj, nowMs);
+    const expectedEndAt = current.djId === dj.id && current.expectedEndAt
+      ? current.expectedEndAt
+      : occurrence?.expiresAt || null;
+
+    if (requestedAction === "confirm") {
+      content.djDetectionState = createConfirmedDjState(dj, expectedEndAt, nowMs);
+    } else {
+      if (current.djId !== dj.id || !isLiveDetectionMode(current.mode)) {
+        throw new Error("Este DJ não possui uma sessão automática ativa.");
+      }
+
+      if (requestedAction === "end") {
+        content.djDetectionState = {
+          ...defaultDjDetectionState(),
+          djId: dj.id,
+          expectedEndAt,
+          forceEnded: true,
+          classification: current.classification,
+          source: "confirmation",
+          observedAt: new Date(nowMs).toISOString(),
+          updatedAt: new Date(nowMs).toISOString(),
+          signals: ["Sessão encerrada pelo painel"],
+        };
+      } else if (requestedAction === "extend") {
+        const extension = [30, 60, 120].includes(Number(minutes)) ? Number(minutes) : 30;
+        const baseMs = Math.max(nowMs, Date.parse(expectedEndAt || "") || nowMs);
+        content.djDetectionState = {
+          ...current,
+          mode: "live",
+          expectedEndAt: new Date(baseMs + extension * 60 * 1000).toISOString(),
+          overrunAcknowledgedAt: null,
+          updatedAt: new Date(nowMs).toISOString(),
+          signals: [...current.signals.filter((signal) => signal !== "Horário excedido"), `Extensão de ${extension} minutos`].slice(-8),
+        };
+      } else {
+        content.djDetectionState = {
+          ...current,
+          overrunAcknowledgedAt: new Date(nowMs).toISOString(),
+          updatedAt: new Date(nowMs).toISOString(),
+          signals: [...current.signals.filter((signal) => signal !== "Horário excedido"), "Continuidade confirmada pelo painel"].slice(-8),
+        };
+      }
+    }
+
+    result = resolveDjDetectionSnapshot(content, nowMs);
+    return content;
+  });
+
+  return result;
+}
+
+function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
   const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
   const config = liveStatusTest.djDetectionConfig;
   const djs = content.djs.map(serializeDj).filter((dj) => dj.active);
   const manualLiveDj = resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs);
-  const eligibleDj = manualLiveDj ? null : findEligibleDj(djs, liveStatusTest.djSkips, nowMs);
-  const activeOccurrence = eligibleDj ? djScheduleOccurrence(eligibleDj, nowMs) : null;
   const state = normalizeDjDetectionState(content.djDetectionState);
+  const scheduledDj = manualLiveDj ? null : findEligibleDj(djs, liveStatusTest.djSkips, nowMs);
+  const markerDj = scheduledDj && observation?.marker && markerMatchesDj(scheduledDj, observation.marker)
+    ? scheduledDj
+    : null;
+  // A DJ who was already confirmed stays on air after the scheduled end only
+  // until normal music is confirmed again. A new scheduled DJ always wins.
+  const continuingDj = manualLiveDj || scheduledDj ? null : findOverrunningDj(djs, state);
+  const eligibleDj = markerDj || scheduledDj || continuingDj;
+  const activeOccurrence = scheduledDj ? djScheduleOccurrence(scheduledDj, nowMs) : null;
+  const stateMatchesEligibleDj = state.djId === eligibleDj?.id;
   const isDetectedLive = Boolean(
-    config.enabled &&
     eligibleDj &&
-    state.mode === "live" &&
-    state.djId === eligibleDj.id,
+    !state.forceEnded &&
+    isLiveDetectionMode(state.mode) &&
+    stateMatchesEligibleDj &&
+    (config.enabled || state.activation === "confirmation"),
   );
+  const expectedEndAt = stateMatchesEligibleDj
+    ? state.expectedEndAt || activeOccurrence?.expiresAt || null
+    : activeOccurrence?.expiresAt || null;
+  const isOverrun = Boolean(isDetectedLive && expectedEndAt && Date.parse(expectedEndAt) <= nowMs);
+  const effectiveState = isOverrun && state.mode === "live" ? { ...state, mode: "overrun" } : state;
   const liveDj = manualLiveDj || (isDetectedLive
-    ? liveDjStatusFromDj(eligibleDj, "detection", "metadados ausentes confirmados")
+    ? liveDjStatusFromDj(
+        eligibleDj,
+        liveDjMatchSource(state.activation),
+        liveDjDescription(state, continuingDj, isOverrun),
+      )
     : null);
 
   return {
     liveDj,
     eligibleDj,
+    markerDj,
     config,
-    state,
+    state: effectiveState,
     nextEligibleAt: nextEligibleDjStart(djs, liveStatusTest.djSkips, nowMs),
-    sessionEndsAt: activeOccurrence?.expiresAt || null,
-    diagnostic: diagnostic ? normalizeDjDetectionDiagnostic(diagnostic) : null,
+    sessionEndsAt: expectedEndAt && Date.parse(expectedEndAt) > nowMs ? expectedEndAt : null,
+    expectedEndAt,
+    isOverrun,
+    diagnostic: observation ? normalizeDjDetectionDiagnostic(observation, effectiveState) : null,
   };
 }
 
@@ -2020,125 +2166,318 @@ function nextDjDetectionState(snapshot, observation, nowMs) {
     ? observation.classification
     : "unknown";
   const source = ["metadata", "shoutcast"].includes(observation.source) ? observation.source : "none";
-  const diagnostic = normalizeDjDetectionDiagnostic({ ...observation, classification, source });
+  const diagnostic = normalizeDjDetectionDiagnostic({ ...observation, classification, source }, current);
+  const eligibleDj = snapshot.eligibleDj;
+  const belongsToEligibleDj = current.djId === eligibleDj?.id;
+  const expectedEndAt = current.expectedEndAt || snapshot.sessionEndsAt || null;
+  const streamFingerprint = observationFingerprint(observation.streamIdentity, observation.streamFingerprint);
+  const streamChanged = Boolean(streamFingerprint && current.streamFingerprint && current.streamFingerprint !== streamFingerprint);
+  const titleFingerprint = observationFingerprint(observation.songTitle, observation.titleFingerprint);
 
   if (snapshot.liveDj?.source === "manual") return current;
-  if (!config.enabled || !snapshot.eligibleDj) {
+  if ((!config.enabled && current.activation !== "confirmation") || !eligibleDj) {
     return current.mode === "waiting" && !current.djId
       ? current
       : { ...defaultDjDetectionState(), updatedAt: new Date(nowMs).toISOString() };
   }
 
+  if (current.forceEnded && belongsToEligibleDj && isForceEndedForCurrentOccurrence(current, nowMs)) {
+    if (classification === "music") {
+      return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+        djId: eligibleDj.id,
+        classification,
+        source,
+        titleFingerprint,
+        streamFingerprint,
+      });
+    }
+    return stateFromObservation(current, diagnostic, nowMs, {
+      djId: eligibleDj.id,
+      classification,
+      source,
+      streamFingerprint,
+      signals: ["Sessão encerrada pelo painel"],
+    });
+  }
+
+  if (snapshot.markerDj) {
+    return createMarkerDjState(eligibleDj, snapshot.sessionEndsAt, diagnostic, nowMs, streamFingerprint);
+  }
+
+  if (observation.marker) {
+    const next = stateFromObservation(belongsToEligibleDj ? current : defaultDjDetectionState(), diagnostic, nowMs, {
+      djId: eligibleDj.id,
+      classification: "unknown",
+      source: "marker",
+      streamFingerprint,
+      signals: ["Marcador do encoder não corresponde ao DJ agendado"],
+    });
+    return sameDjDetectionState(current, next) ? current : next;
+  }
+
   if (classification === "unknown") {
     if (
-      current.djId === snapshot.eligibleDj.id &&
+      current.djId === eligibleDj.id &&
       current.classification === "unknown" &&
       current.source === diagnostic.source &&
       current.lastError === diagnostic.lastError
     ) {
       return current;
     }
-    const next = {
-      ...current,
-      djId: snapshot.eligibleDj.id,
+    const next = stateFromObservation(belongsToEligibleDj ? current : defaultDjDetectionState(), diagnostic, nowMs, {
+      djId: eligibleDj.id,
       classification: "unknown",
       source: diagnostic.source,
-      latencyMs: diagnostic.latencyMs,
-      lastError: diagnostic.lastError,
-      observedAt: diagnostic.observedAt,
-    };
+      streamFingerprint,
+    });
     return sameDjDetectionState(current, next) ? current : { ...next, updatedAt: new Date(nowMs).toISOString() };
   }
 
-  const belongsToEligibleDj = current.djId === snapshot.eligibleDj.id;
   if (classification === "no-metadata") {
-    if (belongsToEligibleDj && (current.mode === "live" || current.mode === "leaving")) {
-      if (current.mode === "live" && current.classification === classification && current.source === diagnostic.source) {
-        return current;
-      }
-      const next = {
-        ...current,
-        mode: "live",
+    if (belongsToEligibleDj && isLiveDetectionMode(current.mode)) {
+      const next = stateFromObservation(current, diagnostic, nowMs, {
+        mode: isPast(expectedEndAt, nowMs) ? "overrun" : "live",
         exitCount: 0,
         classification,
         source: diagnostic.source,
-        latencyMs: diagnostic.latencyMs,
-        lastError: null,
-        observedAt: diagnostic.observedAt,
-      };
-      return sameDjDetectionState(current, next) ? current : { ...next, updatedAt: new Date(nowMs).toISOString() };
+        expectedEndAt,
+        streamFingerprint,
+        streamChanged,
+        titleStale: false,
+        signals: detectionSignals({
+          enterCount: current.enterCount,
+          config,
+          reason: observation.reason,
+          streamChanged,
+          activation: current.activation,
+          overrun: isPast(expectedEndAt, nowMs),
+        }),
+      });
+      if (sameDjDetectionState(current, next)) {
+        return current;
+      }
+      return { ...next, updatedAt: new Date(nowMs).toISOString() };
     }
 
     const enterCount = Math.min(config.enterConfirmations, (belongsToEligibleDj ? current.enterCount : 0) + 1);
-    return {
-      mode: enterCount >= config.enterConfirmations ? "live" : "entering",
-      djId: snapshot.eligibleDj.id,
+    const nextExpectedEnd = belongsToEligibleDj ? current.expectedEndAt || snapshot.sessionEndsAt : snapshot.sessionEndsAt;
+    return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+      mode: enterCount >= config.enterConfirmations
+        ? (isPast(nextExpectedEnd, nowMs) ? "overrun" : "live")
+        : "entering",
+      djId: eligibleDj.id,
       enterCount,
       exitCount: 0,
+      confidence: automaticConfidence(enterCount, config, observation.reason, streamChanged),
+      activation: "automatic",
       classification,
       source: diagnostic.source,
-      observedAt: diagnostic.observedAt,
-      latencyMs: diagnostic.latencyMs,
-      lastError: null,
-      updatedAt: new Date(nowMs).toISOString(),
-    };
+      expectedEndAt: nextExpectedEnd,
+      streamFingerprint,
+      streamChanged,
+      signals: detectionSignals({ enterCount, config, reason: observation.reason, streamChanged, overrun: isPast(nextExpectedEnd, nowMs) }),
+    });
   }
 
-  if (belongsToEligibleDj && (current.mode === "live" || current.mode === "leaving")) {
-    const exitCount = Math.min(config.exitConfirmations, current.exitCount + 1);
+  if (belongsToEligibleDj && isLiveDetectionMode(current.mode)) {
+    const isDistinctMusic = Boolean(titleFingerprint && titleFingerprint !== current.exitMusicFingerprint);
+    const exitCount = isDistinctMusic
+      ? Math.min(config.exitConfirmations, current.exitCount + 1)
+      : current.exitCount;
     if (exitCount >= config.exitConfirmations) {
-      return {
-        ...defaultDjDetectionState(),
+      return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
         classification,
         source: diagnostic.source,
-        observedAt: diagnostic.observedAt,
-        latencyMs: diagnostic.latencyMs,
-        updatedAt: new Date(nowMs).toISOString(),
-      };
+        titleFingerprint,
+        streamFingerprint,
+        signals: ["AutoDJ confirmado por faixas diferentes"],
+      });
     }
-    return {
-      ...current,
+    return stateFromObservation(current, diagnostic, nowMs, {
       mode: "leaving",
       exitCount,
       classification,
       source: diagnostic.source,
-      latencyMs: diagnostic.latencyMs,
-      lastError: null,
-      observedAt: diagnostic.observedAt,
-      updatedAt: new Date(nowMs).toISOString(),
-    };
+      exitMusicFingerprint: isDistinctMusic ? titleFingerprint : current.exitMusicFingerprint,
+      lastMusicFingerprint: titleFingerprint || current.lastMusicFingerprint,
+      musicFingerprintSinceAt: titleFingerprint === current.lastMusicFingerprint
+        ? current.musicFingerprintSinceAt
+        : diagnostic.observedAt,
+      streamFingerprint,
+      streamChanged,
+      titleStale: titleIsStale(current, titleFingerprint, nowMs),
+      signals: [
+        "Saída aguardando confirmação",
+        isDistinctMusic ? `Faixa válida ${exitCount}/${config.exitConfirmations}` : "Mesma faixa mantida como possível atraso",
+      ],
+    });
   }
 
-  return current.mode === "waiting" && current.classification === "music"
-    ? current
-    : {
-        ...defaultDjDetectionState(),
-        classification,
-        source: diagnostic.source,
-        observedAt: diagnostic.observedAt,
-        latencyMs: diagnostic.latencyMs,
-        updatedAt: new Date(nowMs).toISOString(),
-      };
+  const sameTitle = belongsToEligibleDj && titleFingerprint && titleFingerprint === current.lastMusicFingerprint;
+  const musicFingerprintSinceAt = sameTitle ? current.musicFingerprintSinceAt || diagnostic.observedAt : diagnostic.observedAt;
+  const titleStale = Boolean(sameTitle && Date.parse(musicFingerprintSinceAt) && nowMs - Date.parse(musicFingerprintSinceAt) >= DJ_TITLE_STALE_MS);
+  const next = stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+    djId: eligibleDj.id,
+    classification,
+    source: diagnostic.source,
+    lastMusicFingerprint: titleFingerprint,
+    musicFingerprintSinceAt,
+    streamFingerprint,
+    streamChanged,
+    titleStale,
+    signals: titleStale ? ["Título repetido: tratado como possível metadado atrasado"] : ["Música válida identificada"],
+  });
+  return sameDjDetectionState(current, next) ? current : next;
 }
 
-function normalizeDjDetectionDiagnostic(value) {
+function stateFromObservation(current, diagnostic, nowMs, patch = {}) {
+  return {
+    ...current,
+    ...patch,
+    observedAt: diagnostic.observedAt,
+    latencyMs: diagnostic.latencyMs,
+    lastError: diagnostic.lastError,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+}
+
+function createConfirmedDjState(dj, expectedEndAt, nowMs) {
+  return {
+    ...defaultDjDetectionState(),
+    mode: isPast(expectedEndAt, nowMs) ? "overrun" : "live",
+    djId: dj.id,
+    confidence: 100,
+    activation: "confirmation",
+    source: "confirmation",
+    expectedEndAt,
+    observedAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
+    signals: ["Entrada confirmada pelo painel"],
+  };
+}
+
+function createMarkerDjState(dj, expectedEndAt, diagnostic, nowMs, streamFingerprint) {
+  return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+    mode: isPast(expectedEndAt, nowMs) ? "overrun" : "live",
+    djId: dj.id,
+    confidence: 100,
+    activation: "marker",
+    classification: "no-metadata",
+    source: "marker",
+    expectedEndAt,
+    streamFingerprint,
+    signals: ["Marcador explícito do encoder"],
+  });
+}
+
+function normalizeDjDetectionDiagnostic(value, state = null) {
   return {
     classification: ["music", "no-metadata", "unknown"].includes(value?.classification) ? value.classification : "unknown",
-    source: ["metadata", "shoutcast"].includes(value?.source) ? value.source : "none",
+    source: ["metadata", "shoutcast", "marker", "confirmation"].includes(value?.source) ? value.source : "none",
     observedAt: iso(value?.observedAt) || new Date().toISOString(),
     latencyMs: Number.isFinite(Number(value?.latencyMs)) ? Math.max(0, Math.round(Number(value.latencyMs))) : null,
     lastError: String(value?.lastError || "").trim().slice(0, 240) || null,
+    confidence: normalizeRunCount(value?.confidence ?? state?.confidence, 0, 0, 100),
+    signals: Array.isArray(value?.signals) ? value.signals.map(String).filter(Boolean).slice(0, 8) : (state?.signals || []),
   };
 }
 
 function sameDjDetectionState(left, right) {
-  return JSON.stringify(normalizeDjDetectionState(left)) === JSON.stringify(normalizeDjDetectionState(right));
+  const normalizeForComparison = (state) => {
+    const normalized = normalizeDjDetectionState(state);
+    delete normalized.observedAt;
+    delete normalized.latencyMs;
+    delete normalized.updatedAt;
+    return normalized;
+  };
+  return JSON.stringify(normalizeForComparison(left)) === JSON.stringify(normalizeForComparison(right));
+}
+
+function isLiveDetectionMode(mode) {
+  return ["live", "leaving", "overrun"].includes(mode);
+}
+
+function isPast(value, nowMs) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time) && time <= nowMs;
+}
+
+function isForceEndedForCurrentOccurrence(state, nowMs) {
+  return !state.expectedEndAt || Date.parse(state.expectedEndAt) > nowMs;
+}
+
+function automaticConfidence(enterCount, config, reason, streamChanged) {
+  const confirmationProgress = config.enterConfirmations > 0
+    ? Math.round((Math.min(enterCount, config.enterConfirmations) / config.enterConfirmations) * 60)
+    : 0;
+  return Math.min(100, 20 + confirmationProgress + (reason === "technical" ? 10 : 0) + (streamChanged ? 10 : 0));
+}
+
+function detectionSignals({ enterCount, config, reason, streamChanged, activation, overrun }) {
+  const signals = [];
+  if (activation === "marker") signals.push("Marcador explícito do encoder");
+  else if (activation === "confirmation") signals.push("Entrada confirmada pelo painel");
+  else signals.push("Janela de agenda ativa");
+  if (enterCount) signals.push(`Leituras sem música ${enterCount}/${config.enterConfirmations}`);
+  if (reason === "technical") signals.push("Título técnico ou genérico");
+  if (streamChanged) signals.push("Mudança de origem ou reinício do stream");
+  if (overrun) signals.push("Horário excedido");
+  return signals.slice(0, 8);
+}
+
+function titleIsStale(state, titleFingerprint, nowMs) {
+  if (!titleFingerprint || titleFingerprint !== state.lastMusicFingerprint || !state.musicFingerprintSinceAt) return false;
+  const startedAt = Date.parse(state.musicFingerprintSinceAt);
+  return Number.isFinite(startedAt) && nowMs - startedAt >= DJ_TITLE_STALE_MS;
+}
+
+function observationFingerprint(rawValue, suppliedFingerprint) {
+  const raw = String(rawValue || "").trim();
+  if (raw) return sha256Hex(normalizeComparableDetectionText(raw));
+  const supplied = String(suppliedFingerprint || "").trim();
+  return /^[a-f0-9]{64}$/i.test(supplied) ? supplied : null;
+}
+
+function normalizeComparableDetectionText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function markerMatchesDj(dj, marker) {
+  return comparableAudienceText(dj.djName) === comparableAudienceText(marker?.djName) &&
+    comparableAudienceText(dj.programName) === comparableAudienceText(marker?.programName);
+}
+
+function liveDjMatchSource(activation) {
+  if (activation === "marker") return "marker";
+  if (activation === "confirmation") return "confirmed";
+  return "detection";
+}
+
+function liveDjDescription(state, continuingDj, isOverrun) {
+  if (state.activation === "marker") return "marcador confirmado pelo encoder";
+  if (state.activation === "confirmation") return "entrada confirmada pelo painel";
+  if (isOverrun || continuingDj) return "transmissão continuada após o horário";
+  return "metadados ausentes confirmados";
 }
 
 function findEligibleDj(djs, skips, nowMs) {
   return djs
     .filter((dj) => dj.scheduleEnabled && isDjScheduleActive(dj, nowMs) && !isDjSkipped(dj, skips, nowMs))
     .sort((left, right) => left.sortOrder - right.sortOrder || left.startTime.localeCompare(right.startTime))[0] || null;
+}
+
+function findOverrunningDj(djs, state) {
+  if (!state?.djId || !isLiveDetectionMode(state.mode) || state.forceEnded) return null;
+
+  return djs.find((dj) =>
+    dj.id === state.djId &&
+    (dj.scheduleEnabled || state.activation === "confirmation"),
+  ) || null;
 }
 
 function isDjSkipped(dj, skips, nowMs) {
@@ -2239,7 +2578,15 @@ function isDjScheduleActive(dj, nowMs) {
 function liveDjStatusFromDj(dj, matchedSignature, detectedValue) {
   return {
     ...manualLiveDjStatus(dj.djName, dj.programName, matchedSignature, detectedValue),
-    source: matchedSignature === "detection" ? "detection" : matchedSignature === "manual" ? "manual" : "dj",
+    source: matchedSignature === "detection"
+      ? "detection"
+      : matchedSignature === "manual"
+        ? "manual"
+        : matchedSignature === "marker"
+          ? "marker"
+          : matchedSignature === "confirmed"
+            ? "confirmed"
+            : "dj",
     logoUrl: normalizeManagedImageUrl(dj.logoUrl),
     sessionId: dj.id,
     listenersMin: dj.listenersMin,

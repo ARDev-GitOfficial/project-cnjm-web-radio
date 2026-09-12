@@ -67,6 +67,8 @@ export type DjLiveState = {
   config: DjDetectionConfig;
   nextEligibleAt: string | null;
   sessionEndsAt: string | null;
+  expectedEndAt: string | null;
+  isOverrun: boolean;
   version: string;
   fetchedAt: string;
   diagnostic?: {
@@ -75,6 +77,8 @@ export type DjLiveState = {
     observedAt: string | null;
     latencyMs: number | null;
     lastError: string | null;
+    confidence: number;
+    signals: string[];
   };
   message?: string;
 };
@@ -92,6 +96,8 @@ type ApiDjsPayload = {
   config?: Partial<DjDetectionConfig> | null;
   nextEligibleAt?: string | null;
   sessionEndsAt?: string | null;
+  expectedEndAt?: string | null;
+  isOverrun?: boolean;
   version?: string;
   diagnostic?: DjLiveState["diagnostic"];
   image?: {
@@ -135,7 +141,6 @@ type ActiveAudienceProfile = {
   exitPercent: number;
   transitionPercent: number;
   liveBoostPercent: number;
-  visitorGrowthPercent: number;
 };
 
 const API_BASE = "/api/djs";
@@ -343,6 +348,20 @@ export async function setRemoteDjSkippedToday(token: string, djId: string, skipp
   return normalizeLiveStatusTest(payload.liveStatusTest || {});
 }
 
+export async function controlRemoteDjSession(
+  token: string,
+  djId: string,
+  action: "confirm" | "acknowledge" | "end" | "extend",
+  minutes?: 30 | 60 | 120,
+) {
+  const payload = await requestJson<ApiDjsPayload>(`${API_BASE}/${encodeURIComponent(djId)}/session`, {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify({ action, minutes }),
+  });
+  return hydrateDjLiveState(payload);
+}
+
 export function localLiveStatusPayload(message?: string): LiveStatusTestResponse {
   return {
     liveStatusTest: readLiveStatusTest(),
@@ -418,17 +437,30 @@ export function resolveLiveStatusTestMetrics(
     LIVE_TEST_MAX_LISTENERS,
   );
 
+  // Visits are a standalone, monotonic counter. They intentionally do not inherit
+  // listener movement, schedule profiles, DJ boosts, or the listener wave.
   const visitorBase = test.visitorBase ?? test.visitors ?? LIVE_TEST_DEFAULT_VISITORS;
-  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorBase
-    ? test.visitorTarget
-    : Math.round(visitorBase * (1 + Math.min(0.9, profile.visitorGrowthPercent / 140)));
-  const visitorGrowthMinutes = 4 + (1 - profile.visitorGrowthPercent / 100) * 24;
-  const visitorProgress = easedProgress(elapsedMinutes, visitorGrowthMinutes);
   const rampFromVisitors = normalizeWholeNumber(test.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS);
-  const visitorPulse = 1 + softWave * 0.018 * Math.max(0.2, movement) * visitorProgress;
+  const visitorAnchor = Math.max(visitorBase, rampFromVisitors);
+  const visitorTarget = typeof test.visitorTarget === "number" && test.visitorTarget > visitorAnchor
+    ? test.visitorTarget
+    : null;
+  const visitorGrowthPercent = Math.max(1, test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH);
+  const visitorStartedAt = normalizeDateMs(test.visitorAppliedAt);
+  const visitorElapsedMinutes = visitorStartedAt ? Math.max(0, (nowMs - visitorStartedAt) / 60_000) : 0;
+  const targetDurationMinutes = 4 + (1 - visitorGrowthPercent / 100) * 24;
+  const targetProgress = visitorTarget ? easedProgress(visitorElapsedMinutes, targetDurationMinutes) : 0;
+  const targetValue = visitorTarget
+    ? visitorAnchor + (visitorTarget - visitorAnchor) * targetProgress
+    : visitorAnchor;
+  const ongoingMinutes = visitorTarget
+    ? Math.max(0, visitorElapsedMinutes - targetDurationMinutes)
+    : visitorElapsedMinutes;
+  const ongoingBase = visitorTarget ?? visitorAnchor;
+  const ongoingGrowth = ongoingBase * (visitorGrowthPercent / 100) * (ongoingMinutes / (24 * 60));
   const visitors = normalizeWholeNumber(
-    (rampFromVisitors + (visitorTarget - rampFromVisitors) * visitorProgress) * visitorPulse,
-    visitorBase,
+    Math.max(visitorAnchor, targetValue + ongoingGrowth),
+    visitorAnchor,
     0,
     LIVE_TEST_MAX_VISITORS,
   );
@@ -535,8 +567,20 @@ function emptyDjDetectionState(): DjDetectionState {
     djId: null,
     enterCount: 0,
     exitCount: 0,
+    confidence: 0,
+    activation: null,
     classification: null,
     source: "none",
+    expectedEndAt: null,
+    overrunAcknowledgedAt: null,
+    forceEnded: false,
+    lastMusicFingerprint: null,
+    musicFingerprintSinceAt: null,
+    exitMusicFingerprint: null,
+    streamFingerprint: null,
+    titleStale: false,
+    streamChanged: false,
+    signals: [],
     observedAt: null,
     latencyMs: null,
     lastError: null,
@@ -549,14 +593,30 @@ function normalizeDjDetectionState(value: unknown): DjDetectionState {
   const base = emptyDjDetectionState();
   return {
     ...base,
-    mode: item.mode === "entering" || item.mode === "live" || item.mode === "leaving" ? item.mode : "waiting",
+    mode: item.mode === "entering" || item.mode === "live" || item.mode === "leaving" || item.mode === "overrun" ? item.mode : "waiting",
     djId: item.djId ? String(item.djId) : null,
     enterCount: normalizeWholeNumber(item.enterCount, 0, 0, 5),
     exitCount: normalizeWholeNumber(item.exitCount, 0, 0, 5),
+    confidence: normalizeWholeNumber(item.confidence, 0, 0, 100),
+    activation: item.activation === "automatic" || item.activation === "marker" || item.activation === "confirmation"
+      ? item.activation
+      : null,
     classification: item.classification === "music" || item.classification === "no-metadata" || item.classification === "unknown"
       ? item.classification
       : null,
-    source: item.source === "metadata" || item.source === "shoutcast" ? item.source : "none",
+    source: item.source === "metadata" || item.source === "shoutcast" || item.source === "marker" || item.source === "confirmation"
+      ? item.source
+      : "none",
+    expectedEndAt: normalizeIsoString(item.expectedEndAt) || null,
+    overrunAcknowledgedAt: normalizeIsoString(item.overrunAcknowledgedAt) || null,
+    forceEnded: item.forceEnded === true,
+    lastMusicFingerprint: item.lastMusicFingerprint ? String(item.lastMusicFingerprint) : null,
+    musicFingerprintSinceAt: normalizeIsoString(item.musicFingerprintSinceAt) || null,
+    exitMusicFingerprint: item.exitMusicFingerprint ? String(item.exitMusicFingerprint) : null,
+    streamFingerprint: item.streamFingerprint ? String(item.streamFingerprint) : null,
+    titleStale: item.titleStale === true,
+    streamChanged: item.streamChanged === true,
+    signals: Array.isArray(item.signals) ? item.signals.map(String).filter(Boolean).slice(0, 8) : [],
     observedAt: normalizeIsoString(item.observedAt) || null,
     latencyMs: Number.isFinite(Number(item.latencyMs)) ? Math.max(0, Math.round(Number(item.latencyMs))) : null,
     lastError: String(item.lastError || "").trim() || null,
@@ -586,6 +646,8 @@ function emptyDjLiveState(message?: string): DjLiveState {
     config: emptyDjDetectionConfig(),
     nextEligibleAt: null,
     sessionEndsAt: null,
+    expectedEndAt: null,
+    isOverrun: false,
     version: "unavailable",
     fetchedAt: new Date().toISOString(),
     message,
@@ -612,6 +674,8 @@ function hydrateDjLiveState(payload: ApiDjsPayload): DjLiveState {
     config: normalizeDjDetectionConfig(payload.config),
     nextEligibleAt: normalizeIsoString(payload.nextEligibleAt) || null,
     sessionEndsAt: normalizeIsoString(payload.sessionEndsAt) || null,
+    expectedEndAt: normalizeIsoString(payload.expectedEndAt) || null,
+    isOverrun: payload.isOverrun === true,
     version: String(payload.version || "waiting"),
     fetchedAt: payload.fetchedAt || new Date().toISOString(),
     diagnostic: payload.diagnostic,
@@ -703,6 +767,7 @@ export function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>)
     rampFromVisitors: normalizeWholeNumber(payload.rampFromVisitors, visitorBase, 0, LIVE_TEST_MAX_VISITORS),
     seed: normalizeWholeNumber(payload.seed, 731, 1, 999_999),
     appliedAt: normalizeIsoString(payload.appliedAt) || updatedAt,
+    visitorAppliedAt: normalizeIsoString(payload.visitorAppliedAt) || null,
     updatedAt,
     scheduleProfiles: normalizeAudienceScheduleProfiles(payload.scheduleProfiles),
     djProfiles: normalizeAudienceDjProfiles(payload.djProfiles),
@@ -725,7 +790,6 @@ export function emptyAudienceScheduleProfile(): AudienceScheduleProfile {
     movementPercent: 42,
     exitPercent: 28,
     transitionPercent: 62,
-    visitorGrowthPercent: 14,
   };
 }
 
@@ -821,7 +885,6 @@ function normalizeAudienceScheduleProfiles(value: unknown): AudienceScheduleProf
       movementPercent: normalizeWholeNumber(item.movementPercent, LIVE_TEST_DEFAULT_MOVEMENT, 0, LIVE_TEST_MAX_PERCENT),
       exitPercent: normalizeWholeNumber(item.exitPercent, LIVE_TEST_DEFAULT_EXIT, 0, LIVE_TEST_MAX_PERCENT),
       transitionPercent: normalizeWholeNumber(item.transitionPercent, LIVE_TEST_DEFAULT_TRANSITION, 0, 100),
-      visitorGrowthPercent: normalizeWholeNumber(item.visitorGrowthPercent, LIVE_TEST_DEFAULT_GROWTH, 0, LIVE_TEST_MAX_GROWTH_PERCENT),
     };
   });
 }
@@ -965,7 +1028,6 @@ function globalAudienceProfile(test: LiveStatusTestPayload): ActiveAudienceProfi
     exitPercent: test.exitPercent ?? LIVE_TEST_DEFAULT_EXIT,
     transitionPercent: test.transitionPercent ?? LIVE_TEST_DEFAULT_TRANSITION,
     liveBoostPercent: test.liveBoostPercent ?? LIVE_TEST_DEFAULT_LIVE_BOOST,
-    visitorGrowthPercent: test.visitorGrowthPercent ?? test.growthPercent ?? LIVE_TEST_DEFAULT_GROWTH,
   };
 }
 
@@ -977,7 +1039,6 @@ function profileFromSchedule(profile: AudienceScheduleProfile): Partial<ActiveAu
     movementPercent: profile.movementPercent,
     exitPercent: profile.exitPercent,
     transitionPercent: profile.transitionPercent,
-    visitorGrowthPercent: profile.visitorGrowthPercent,
   };
 }
 

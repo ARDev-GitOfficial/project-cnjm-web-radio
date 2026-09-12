@@ -33,7 +33,7 @@ export type LiveDjStatus = {
   listenersMax?: number | null;
   matchedSignature?: string | null;
   detectedValue?: string | null;
-  source: "autodj" | "dj" | "test" | "manual" | "detection" | "metadata" | "fallback";
+  source: "autodj" | "dj" | "test" | "manual" | "confirmed" | "marker" | "detection" | "metadata" | "fallback";
 };
 
 export type AudienceScheduleProfile = {
@@ -48,7 +48,6 @@ export type AudienceScheduleProfile = {
   movementPercent: number;
   exitPercent: number;
   transitionPercent: number;
-  visitorGrowthPercent: number;
 };
 
 export type AudienceDjProfile = {
@@ -101,16 +100,30 @@ export type DjSkip = {
   expiresAt: string;
 };
 
-export type DjDetectionMode = "waiting" | "entering" | "live" | "leaving";
+export type DjDetectionMode = "waiting" | "entering" | "live" | "leaving" | "overrun";
 export type DjMetadataClassification = "music" | "no-metadata" | "unknown";
+export type DjDetectionSource = "metadata" | "shoutcast" | "marker" | "confirmation" | "none";
+export type DjDetectionActivation = "automatic" | "marker" | "confirmation" | null;
 
 export type DjDetectionState = {
   mode: DjDetectionMode;
   djId: string | null;
   enterCount: number;
   exitCount: number;
+  confidence: number;
+  activation: DjDetectionActivation;
   classification: DjMetadataClassification | null;
-  source: "metadata" | "shoutcast" | "none";
+  source: DjDetectionSource;
+  expectedEndAt: string | null;
+  overrunAcknowledgedAt: string | null;
+  forceEnded: boolean;
+  lastMusicFingerprint: string | null;
+  musicFingerprintSinceAt: string | null;
+  exitMusicFingerprint: string | null;
+  streamFingerprint: string | null;
+  titleStale: boolean;
+  streamChanged: boolean;
+  signals: string[];
   observedAt: string | null;
   latencyMs: number | null;
   lastError: string | null;
@@ -140,6 +153,8 @@ export type LiveStatusSimulation = {
   seed?: number;
   updatedAt?: string;
   appliedAt?: string;
+  /** Independent anchor for the monotonically increasing visit counter. */
+  visitorAppliedAt?: string | null;
   scheduleProfiles?: AudienceScheduleProfile[];
   djProfiles?: AudienceDjProfile[];
   liveDjControl?: ManualLiveDjControl;

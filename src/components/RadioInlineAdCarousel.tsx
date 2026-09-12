@@ -97,7 +97,6 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
   if (!radioAds.length) return null;
 
   const hasControls = radioAds.length > 1;
-  const showDots = radioAds.length <= 12;
 
   return (
     <aside className={["radio-inline-ad-card", className].filter(Boolean).join(" ")} aria-label={label}>
@@ -132,21 +131,6 @@ export function RadioInlineAdCarousel({ className = "", label = "Publicidade" }:
           >
             <ChevronRight size={15} aria-hidden="true" />
           </button>
-          {showDots ? (
-            <div className="radio-inline-ad-dots" aria-label={`${activeIndex + 1} de ${radioAds.length}`}>
-              {radioAds.map((ad, index) => (
-                <button
-                  key={ad.id}
-                  type="button"
-                  className={index === activeIndex ? "is-active" : ""}
-                  aria-label={`Ver anúncio ${index + 1}`}
-                  onClick={() => goToAd(index)}
-                />
-              ))}
-            </div>
-          ) : (
-            <span className="radio-inline-ad-count">{activeIndex + 1}/{radioAds.length}</span>
-          )}
         </>
       ) : null}
     </aside>

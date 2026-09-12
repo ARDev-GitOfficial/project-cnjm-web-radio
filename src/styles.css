@@ -1145,7 +1145,7 @@ select:focus {
 .track-line {
   display: grid;
   width: min(455px, 100%);
-  grid-template-columns: 53px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 7px;
@@ -1160,6 +1160,10 @@ select:focus {
     inset 0 -22px 46px rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(5px) saturate(1.04);
   -webkit-backdrop-filter: blur(5px) saturate(1.04);
+}
+
+.track-line.has-cover {
+  grid-template-columns: 53px minmax(0, 1fr);
 }
 
 .track-line img {
@@ -1185,8 +1189,8 @@ select:focus {
   text-transform: uppercase;
 }
 
-.track-line strong,
-.track-line span {
+.track-line > div > strong,
+.track-line > div > .current-track-artist {
   overflow: hidden;
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1200,7 +1204,7 @@ select:focus {
   line-height: 1;
 }
 
-.track-line span {
+.track-line > div > .current-track-artist {
   color: rgba(245, 248, 238, 0.62);
   font-size: 0.64rem;
   font-weight: 800;
@@ -1210,6 +1214,14 @@ select:focus {
   display: block;
   overflow: hidden;
   max-width: 100%;
+  min-width: 0;
+}
+
+.marquee-text-viewport {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .marquee-text-track {
@@ -1217,10 +1229,17 @@ select:focus {
   min-width: 100%;
   gap: 44px;
   white-space: nowrap;
+  will-change: transform;
+}
+
+.marquee-text-copy {
+  display: block;
+  min-width: max-content;
 }
 
 .marquee-text.is-scrolling .marquee-text-track {
-  animation: marquee 13s linear infinite;
+  min-width: max-content;
+  animation: marquee 16s ease-in-out infinite;
 }
 
 .hero-actions {
@@ -4529,12 +4548,18 @@ select:focus {
 }
 
 @keyframes marquee {
-  from {
+  0%,
+  24% {
     transform: translateX(0);
   }
 
-  to {
+  57%,
+  76% {
     transform: translateX(calc(-50% - 22px));
+  }
+
+  100% {
+    transform: translateX(0);
   }
 }
 
@@ -4923,6 +4948,10 @@ select:focus {
   }
 
   .track-line {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .track-line.has-cover {
     grid-template-columns: 48px minmax(0, 1fr);
   }
 
@@ -5102,6 +5131,10 @@ select:focus {
   }
 
   .track-line {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .track-line.has-cover {
     grid-template-columns: 41px minmax(0, 1fr);
   }
 
@@ -5653,8 +5686,12 @@ select:focus {
   }
 
   .track-line {
-    grid-template-columns: 33px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     padding: 5px;
+  }
+
+  .track-line.has-cover {
+    grid-template-columns: 33px minmax(0, 1fr);
   }
 
   .track-line img {
@@ -5666,7 +5703,7 @@ select:focus {
     font-size: 0.75rem;
   }
 
-  .track-line span {
+  .track-line > div > .current-track-artist {
     font-size: 0.56rem;
   }
 

@@ -343,7 +343,7 @@ export const RadioHomePage = memo(function RadioHomePage() {
                 <BrandMantra className={isPlaying ? "hero-mantra is-playing" : "hero-mantra"} />
               </div>
 
-              <div className="track-line">
+              <div className={cover ? "track-line has-cover" : "track-line"}>
                 {cover ? (
                   <img
                     src={cover}
@@ -352,14 +352,15 @@ export const RadioHomePage = memo(function RadioHomePage() {
                     decoding="async"
                     draggable={false}
                     onError={(event) => {
+                      event.currentTarget.onerror = null;
                       event.currentTarget.src = DEFAULT_COVER;
                     }}
                   />
                 ) : null}
                 <div>
-                  <small className="current-program-chip">No ar: {currentProgramName}</small>
+                  <MarqueeText as="small" className="current-program-chip" text={`No ar: ${currentProgramName}`} />
                   <MarqueeText as="strong" text={trackTitle} />
-                  <span>{trackArtist}</span>
+                  <MarqueeText className="current-track-artist" text={trackArtist} />
                 </div>
               </div>
 

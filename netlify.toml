@@ -4,16 +4,17 @@
   functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "24"
+  NODE_VERSION = "22"
   PNPM_VERSION = "9.15.4"
   COREPACK_ENABLE_STRICT = "0"
   COREPACK_INTEGRITY_KEYS = "0"
 
 [functions]
   node_bundler = "esbuild"
-  # Sharp usa binários nativos; mantê-lo externo faz o Netlify levar o módulo
-  # completo para a função, em vez de tentar incorporá-lo ao arquivo gerado.
-  external_node_modules = ["sharp"]
+  # Sharp carrega estes pacotes Linux dinamicamente. Eles precisam acompanhar a
+  # função para que o conversor esteja disponível em execução, não só no build.
+  external_node_modules = ["sharp", "@img/sharp-linux-x64", "@img/sharp-libvips-linux-x64"]
+  included_files = ["node_modules/@img/sharp-linux-x64/**", "node_modules/@img/sharp-libvips-linux-x64/**"]
 
 [[headers]]
   for = "/*"

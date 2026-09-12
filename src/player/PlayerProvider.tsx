@@ -48,8 +48,8 @@ const STATION_NAME = "Web Rádio Conexão Jamaica";
 const DEFAULT_PAGE_TITLE = `${STATION_NAME} | Reggae ao vivo`;
 const EQ_FREQUENCIES = [60, 170, 350, 1000, 3500, 10000];
 const DEFAULT_EQ = EQ_FREQUENCIES.map(() => 0);
-// A short public refresh catches scheduled DJ handoffs while the active-DJ response avoids metadata calls.
-const NOW_PLAYING_REFRESH_MS = 60_000;
+// The shared API cache also expires every 15 seconds, keeping cover and tags current.
+const NOW_PLAYING_REFRESH_MS = 15_000;
 const LOCAL_SIMULATION_REFRESH_MS = 5_000;
 
 type BrowserAudioContext = typeof AudioContext;

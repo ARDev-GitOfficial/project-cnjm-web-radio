@@ -126,9 +126,9 @@ const publicProgramsCacheHeaders = publicCacheHeaders({
   staleWhileRevalidate: 7200,
 });
 const nowPlayingCacheHeaders = publicCacheHeaders({
-  browserMaxAge: 120,
-  cdnMaxAge: 120,
-  staleWhileRevalidate: 600,
+  browserMaxAge: 15,
+  cdnMaxAge: 15,
+  staleWhileRevalidate: 0,
 });
 const liveDjNowPlayingCacheHeaders = publicCacheHeaders({
   browserMaxAge: 15,

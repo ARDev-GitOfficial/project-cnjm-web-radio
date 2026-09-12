@@ -1535,7 +1535,7 @@ export function AdsAdminPage() {
     );
   };
 
-  const applyAudienceDraft = async () => {
+  const applyAudienceDraft = async (successMessage?: string) => {
     if (!canManageLiveMetrics) {
       setActionMessage("Conecte o conteúdo global antes de alterar a audiência.");
       return;
@@ -1559,9 +1559,9 @@ export function AdsAdminPage() {
 
     await persistAudienceConfig(
       next,
-      session?.source === "blobs"
+      successMessage || (session?.source === "blobs"
         ? "Audiência aplicada no site publicado."
-        : "Audiência aplicada no teste local.",
+        : "Audiência aplicada no teste local."),
     );
   };
 
@@ -2111,7 +2111,7 @@ export function AdsAdminPage() {
               </div>
 
               <div className="audience-control-actions">
-                <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
+                <button className="play-main slim" type="button" onClick={() => void applyAudienceDraft()} disabled={!canManageLiveMetrics || isAudienceSaving}>
                   <Save size={16} /> {isAudienceSaving ? "Aplicando..." : isLiveMetricsRemote ? "Aplicar ouvintes" : "Aplicar ouvintes local"}
                 </button>
                 <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
@@ -2172,10 +2172,13 @@ export function AdsAdminPage() {
                     min="0"
                     max={LIVE_TEST_MAX_VISITORS}
                     value={visitorDraft.visitorBase}
-                    onChange={(event) => setVisitorDraft((current) => ({
-                      ...current,
-                      visitorBase: parseLiveMetric(event.currentTarget.value, current.visitorBase, LIVE_TEST_MAX_VISITORS),
-                    }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setVisitorDraft((current) => ({
+                        ...current,
+                        visitorBase: parseLiveMetric(value, current.visitorBase, LIVE_TEST_MAX_VISITORS),
+                      }));
+                    }}
                     disabled={!canManageLiveMetrics}
                   />
                 </label>
@@ -2187,14 +2190,17 @@ export function AdsAdminPage() {
                     max={LIVE_TEST_MAX_VISITORS}
                     value={visitorDraft.visitorTarget ?? ""}
                     placeholder="Opcional"
-                    onChange={(event) => setVisitorDraft((current) => ({
-                      ...current,
-                      visitorTarget: parseOptionalMetric(
-                        event.currentTarget.value,
-                        Math.max(resolvedLiveMetrics.visitors, current.visitorBase),
-                        LIVE_TEST_MAX_VISITORS,
-                      ),
-                    }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setVisitorDraft((current) => ({
+                        ...current,
+                        visitorTarget: parseOptionalMetric(
+                          value,
+                          Math.max(resolvedLiveMetrics.visitors, current.visitorBase),
+                          LIVE_TEST_MAX_VISITORS,
+                        ),
+                      }));
+                    }}
                     disabled={!canManageLiveMetrics}
                   />
                 </label>
@@ -2208,10 +2214,13 @@ export function AdsAdminPage() {
                     min="1"
                     max={LIVE_TEST_MAX_GROWTH_PERCENT}
                     value={visitorDraft.visitorGrowthPercent}
-                    onChange={(event) => setVisitorDraft((current) => ({
-                      ...current,
-                      visitorGrowthPercent: Math.max(1, parseLiveMetric(event.currentTarget.value, LIVE_TEST_DEFAULT_GROWTH, LIVE_TEST_MAX_GROWTH_PERCENT)),
-                    }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setVisitorDraft((current) => ({
+                        ...current,
+                        visitorGrowthPercent: Math.max(1, parseLiveMetric(value, LIVE_TEST_DEFAULT_GROWTH, LIVE_TEST_MAX_GROWTH_PERCENT)),
+                      }));
+                    }}
                     disabled={!canManageLiveMetrics}
                   />
                 </label>
@@ -2417,7 +2426,7 @@ export function AdsAdminPage() {
             )}
 
             <div className="audience-control-actions">
-              <button className="play-main slim" type="button" onClick={applyAudienceDraft} disabled={!canManageLiveMetrics || isAudienceSaving}>
+              <button className="play-main slim" type="button" onClick={() => void applyAudienceDraft()} disabled={!canManageLiveMetrics || isAudienceSaving}>
                 <Save size={16} /> Aplicar agenda e regras
               </button>
               <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
@@ -2514,6 +2523,23 @@ export function AdsAdminPage() {
                 <span>Sem regra cadastrada, o site usa a base global o dia todo.</span>
               </div>
             )}
+            <div className="audience-control-actions">
+              <button
+                className="play-main slim"
+                type="button"
+                onClick={() => void applyAudienceDraft(
+                  isLiveMetricsRemote
+                    ? "Regras por horário aplicadas no site publicado."
+                    : "Regras por horário aplicadas no teste local.",
+                )}
+                disabled={!canManageLiveMetrics || isAudienceSaving || !isAudienceDraftDirty}
+              >
+                <Save size={16} /> {isAudienceSaving ? "Aplicando..." : "Aplicar regras por horário"}
+              </button>
+              <button className="ghost-button" type="button" onClick={restoreAudienceDraft} disabled={!canManageLiveMetrics || !isAudienceDraftDirty}>
+                <RefreshCw size={16} /> Descartar rascunho
+              </button>
+            </div>
           </section>
 
           {false ? (

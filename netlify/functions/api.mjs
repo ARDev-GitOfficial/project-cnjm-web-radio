@@ -1426,7 +1426,7 @@ async function handleLiveStatusTest(event, pathname) {
         source: "blobs",
         liveStatusTest,
         fetchedAt: new Date().toISOString(),
-      }, nowPlayingCacheHeaders);
+      });
     } catch (error) {
       return json(200, {
         ok: false,
@@ -1434,7 +1434,7 @@ async function handleLiveStatusTest(event, pathname) {
         liveStatusTest: { state: "off" },
         fetchedAt: new Date().toISOString(),
         message: error instanceof Error && error.message ? error.message : "Audiência indisponível.",
-      }, nowPlayingCacheHeaders);
+      });
     }
   }
 

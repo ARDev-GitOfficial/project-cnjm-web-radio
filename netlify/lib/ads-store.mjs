@@ -1201,7 +1201,7 @@ export async function listPublicDjs() {
 export async function getConfiguredLiveDjStatus(options = {}) {
   const { cacheOnly = false, nowMs = Date.now() } = options;
   const content = await readSiteContent({ forceRefresh: cacheOnly });
-  return resolveConfiguredLiveDjStatus(content.liveStatusTest, content.djs, nowMs);
+  return resolveConfiguredLiveDjStatus(content.liveStatusTest, content.djs, nowMs, content.programs);
 }
 
 function defaultLiveStatus() {
@@ -1964,7 +1964,7 @@ export function resolveManualLiveDjStatus(payload, nowMs = Date.now()) {
   return null;
 }
 
-export function resolveConfiguredLiveDjStatus(payload, djs, nowMs = Date.now()) {
+export function resolveConfiguredLiveDjStatus(payload, djs, nowMs = Date.now(), programs = []) {
   const control = serializeLiveStatus(payload).liveDjControl || defaultLiveDjControl();
   const configuredDjs = Array.isArray(djs)
     ? djs.map(serializeDj).filter((dj) => dj.active)
@@ -1973,7 +1973,7 @@ export function resolveConfiguredLiveDjStatus(payload, djs, nowMs = Date.now()) 
   if (control.enabled && control.active) {
     const manualDj = findConfiguredDj(configuredDjs, control);
     return manualDj
-      ? liveDjStatusFromDj(manualDj, "manual", "controle manual")
+      ? liveDjStatusFromDj(manualDj, "manual", "controle manual", programs)
       : manualLiveDjStatus(control.djName, control.programName, "manual", "controle manual");
   }
 
@@ -2113,7 +2113,7 @@ function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
   const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
   const config = liveStatusTest.djDetectionConfig;
   const djs = content.djs.map(serializeDj).filter((dj) => dj.active);
-  const manualLiveDj = resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs);
+  const manualLiveDj = resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs, content.programs);
   const state = normalizeDjDetectionState(content.djDetectionState);
   const scheduledDj = manualLiveDj ? null : findEligibleDj(djs, liveStatusTest.djSkips, nowMs);
   const markerDj = scheduledDj && observation?.marker && markerMatchesDj(scheduledDj, observation.marker)
@@ -2142,6 +2142,7 @@ function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
         eligibleDj,
         liveDjMatchSource(state.activation),
         liveDjDescription(state, continuingDj, isOverrun),
+        content.programs,
       )
     : null);
 
@@ -2575,7 +2576,22 @@ function isDjScheduleActive(dj, nowMs) {
   return isAudienceScheduleActive(dj.dayIds, dj.startTime, dj.endTime, parts);
 }
 
-function liveDjStatusFromDj(dj, matchedSignature, detectedValue) {
+function liveDjArtwork(dj, programs = []) {
+  const djLogoUrl = normalizeManagedImageUrl(dj.logoUrl);
+  if (djLogoUrl) return djLogoUrl;
+
+  const programName = comparableAudienceText(dj.programName);
+  if (!programName) return "";
+
+  const matchingProgram = programs
+    .map(serializeProgram)
+    .find((program) => program.active &&
+      comparableAudienceText(program.program) === programName &&
+      normalizeManagedImageUrl(program.logoUrl));
+  return matchingProgram ? normalizeManagedImageUrl(matchingProgram.logoUrl) : "";
+}
+
+function liveDjStatusFromDj(dj, matchedSignature, detectedValue, programs = []) {
   return {
     ...manualLiveDjStatus(dj.djName, dj.programName, matchedSignature, detectedValue),
     source: matchedSignature === "detection"
@@ -2587,7 +2603,8 @@ function liveDjStatusFromDj(dj, matchedSignature, detectedValue) {
           : matchedSignature === "confirmed"
             ? "confirmed"
             : "dj",
-    logoUrl: normalizeManagedImageUrl(dj.logoUrl),
+    // The DJ artwork comes first; the program artwork is the branded fallback.
+    logoUrl: liveDjArtwork(dj, programs),
     sessionId: dj.id,
     listenersMin: dj.listenersMin,
     listenersMax: dj.listenersMax,

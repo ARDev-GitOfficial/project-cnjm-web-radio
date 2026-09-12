@@ -281,7 +281,9 @@ export async function uploadDjLogo(
 
 export async function fetchLiveStatusTest(signal?: AbortSignal): Promise<LiveStatusTestResponse> {
   try {
-    const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", { signal });
+    // This is an authenticated admin read. It must never reuse a public CDN response
+    // after a save, otherwise the editor can be reset with an old audience draft.
+    const payload = await requestJson<ApiDjsPayload>("/api/live-status-test", { signal, cache: "no-store" });
     return {
       liveStatusTest: normalizeLiveStatusTest(payload.liveStatusTest || { state: "off" }),
       source: payload.source === "blobs" ? "blobs" : "fallback",

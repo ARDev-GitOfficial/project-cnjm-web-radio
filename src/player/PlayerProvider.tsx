@@ -82,6 +82,28 @@ function absoluteMediaUrl(value: string) {
   }
 }
 
+function mediaImageType(source: string) {
+  try {
+    const pathname = new URL(source).pathname.toLowerCase();
+    if (pathname.endsWith(".webp")) return "image/webp";
+    if (pathname.endsWith(".png")) return "image/png";
+    if (pathname.endsWith(".avif")) return "image/avif";
+    if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) return "image/jpeg";
+  } catch {
+    // The artwork is ignored below when its URL cannot be resolved.
+  }
+  return undefined;
+}
+
+function dynamicArtwork(source: string) {
+  const type = mediaImageType(source);
+  return ["96x96", "128x128", "192x192", "256x256", "384x384", "512x512"].map((sizes) => ({
+    src: source,
+    sizes,
+    ...(type ? { type } : {}),
+  }));
+}
+
 function updateMediaSession(nowPlaying: NowPlayingResponse) {
   if (typeof window === "undefined") return;
 
@@ -102,9 +124,10 @@ function updateMediaSession(nowPlaying: NowPlayingResponse) {
       type: "image/webp",
     },
   ];
-  const artwork = coverUrl
-    ? [{ src: absoluteMediaUrl(coverUrl), sizes: "512x512" }, ...stationArtwork]
-    : stationArtwork;
+  const dynamicArtworkUrl = coverUrl ? absoluteMediaUrl(coverUrl) : "";
+  // Do not mix the station fallback with a current cover. Some Android surfaces
+  // choose the last equally sized image and would keep showing the radio icon.
+  const artwork = dynamicArtworkUrl ? dynamicArtwork(dynamicArtworkUrl) : stationArtwork;
 
   try {
     navigator.mediaSession.metadata = new MediaMetadata({

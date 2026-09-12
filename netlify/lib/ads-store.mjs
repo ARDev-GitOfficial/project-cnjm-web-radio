@@ -1,6 +1,5 @@
 import { getStore } from "@netlify/blobs";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import sharp from "sharp";
 
 export const AD_BANNER_WIDTH = 1700;
 export const AD_BANNER_HEIGHT = 450;
@@ -71,6 +70,20 @@ let publicDjsMemoryCache = null;
 let liveStatusMemoryCache = null;
 let siteContentMemoryCache = null;
 let siteContentWriteQueue = Promise.resolve();
+let sharpLoader = null;
+
+async function loadSharp() {
+  if (!sharpLoader) {
+    sharpLoader = import("sharp")
+      .then((module) => module.default)
+      .catch((error) => {
+        sharpLoader = null;
+        throw new Error("O conversor de imagens não está disponível nesta implantação.", { cause: error });
+      });
+  }
+
+  return sharpLoader;
+}
 
 function firstEnv(keys) {
   for (const key of keys) {
@@ -1406,6 +1419,7 @@ async function storeOptimizedImage({ kind, input, fileName }) {
     program: { width: PROGRAM_LOGO_MAX_DIMENSION, height: PROGRAM_LOGO_MAX_DIMENSION, fit: "inside", quality: 86, prefix: "program" },
     dj: { width: DJ_LOGO_SIZE, height: DJ_LOGO_SIZE, fit: "cover", quality: 86, prefix: "dj" },
   }[normalizeMediaKind(kind)];
+  const sharp = await loadSharp();
   const source = sharp(input, { animated: false, limitInputPixels: MAX_MEDIA_PIXELS }).rotate();
   const metadata = await source.metadata();
   if (!metadata.width || !metadata.height || !["jpeg", "png", "webp", "heif"].includes(metadata.format || "")) {

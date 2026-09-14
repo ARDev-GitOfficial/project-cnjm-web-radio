@@ -291,10 +291,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     const schedule = (liveState: DjLiveState) => {
       if (stopped || document.hidden) return;
-      const configuredDelay = liveState.config.enabled && (liveState.eligibleDj || liveState.liveDj?.isLive)
+      const configuredDelay = liveState.config.enabled && (liveState.isDetectionWindowActive || liveState.liveDj?.isLive)
         ? liveState.config.pollSeconds * 1_000
         : 60_000;
-      const nextBoundary = liveState.sessionEndsAt || liveState.nextEligibleAt;
+      const nextBoundary = liveState.sessionEndsAt || liveState.nextDetectionAt || liveState.nextEligibleAt;
       const boundaryMs = nextBoundary ? Date.parse(nextBoundary) : NaN;
       const untilBoundary = Number.isFinite(boundaryMs) ? boundaryMs - Date.now() + 600 : Infinity;
       const delay = Math.max(1_000, Math.min(configuredDelay, untilBoundary));

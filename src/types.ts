@@ -33,7 +33,7 @@ export type LiveDjStatus = {
   listenersMax?: number | null;
   matchedSignature?: string | null;
   detectedValue?: string | null;
-  source: "autodj" | "dj" | "test" | "manual" | "confirmed" | "marker" | "detection" | "metadata" | "fallback";
+  source: "autodj" | "dj" | "test" | "manual" | "confirmed" | "marker" | "detection" | "vox" | "metadata" | "fallback";
 };
 
 export type AudienceScheduleProfile = {
@@ -89,6 +89,8 @@ export type ManualLiveDjControl = {
 export type DjDetectionConfig = {
   enabled: boolean;
   pollSeconds: 15 | 30 | 60;
+  earlyWindowMinutes: 0 | 15 | 30 | 45 | 60;
+  panelRefreshSeconds: 15 | 30 | 60;
   enterConfirmations: number;
   exitConfirmations: number;
   updatedAt?: string | null;
@@ -102,8 +104,8 @@ export type DjSkip = {
 
 export type DjDetectionMode = "waiting" | "entering" | "live" | "leaving" | "overrun";
 export type DjMetadataClassification = "music" | "no-metadata" | "unknown";
-export type DjDetectionSource = "metadata" | "shoutcast" | "marker" | "confirmation" | "none";
-export type DjDetectionActivation = "automatic" | "marker" | "confirmation" | null;
+export type DjDetectionSource = "metadata" | "shoutcast" | "marker" | "confirmation" | "vox" | "none";
+export type DjDetectionActivation = "automatic" | "marker" | "confirmation" | "vox" | null;
 
 export type DjDetectionState = {
   mode: DjDetectionMode;
@@ -127,6 +129,10 @@ export type DjDetectionState = {
   observedAt: string | null;
   latencyMs: number | null;
   lastError: string | null;
+  voxUnavailable: boolean;
+  lastTransition: string | null;
+  lastTransitionAt: string | null;
+  lastTransitionReason: string | null;
   updatedAt: string | null;
 };
 

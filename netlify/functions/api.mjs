@@ -11,6 +11,8 @@ import {
   getCurrentLiveDjStatus,
   getDjDetectionSnapshot,
   getLiveStatusTest,
+  getVoxIntegrationCredentials,
+  getVoxIntegrationStatus,
   importSiteImage,
   isAdminRequest,
   isValidAdminLogin,
@@ -29,9 +31,11 @@ import {
   saveLiveStatusTest,
   saveProgram,
   saveProgramLogo,
+  saveVoxIntegration,
   setDjSkippedToday,
   updateAdStats,
 } from "../lib/ads-store.mjs";
+import { normalizeVoxLogin, readVoxDjConnectionSnapshot } from "../lib/vox-status.mjs";
 
 const STATISTICS_URL = "https://s03.svrdedicado.org:7586/statistics?json=1";
 const HISTORY_URL = "https://s03.svrdedicado.org:7586/played?sid=1";
@@ -447,8 +451,60 @@ function publicDetectionError(error) {
   return "Metadados da rádio indisponíveis.";
 }
 
-async function fetchDjDetectionObservation() {
+async function fetchDjDetectionObservation(snapshot) {
   const startedAt = Date.now();
+  const voxCandidates = Array.isArray(snapshot?.voxCandidates) ? snapshot.voxCandidates : [];
+  let vox = null;
+
+  if (voxCandidates.length > 0) {
+    try {
+      const credentials = await getVoxIntegrationCredentials();
+      if (credentials) {
+        const reading = await readVoxDjConnectionSnapshot(credentials);
+        vox = {
+          statuses: reading.statuses,
+          cachedAt: new Date(reading.cachedAt).toISOString(),
+          fromCache: reading.fromCache === true,
+          latencyMs: reading.latencyMs,
+        };
+        const candidateStatuses = voxCandidates.map((candidate) =>
+          reading.statuses[normalizeVoxLogin(candidate.dj?.voxLogin)]?.status || "unknown",
+        );
+        const hasOnlineDj = candidateStatuses.includes("online");
+        if (hasOnlineDj) {
+          return {
+            classification: "unknown",
+            source: "vox",
+            reason: "vox-connected",
+            vox,
+            observedAt: new Date().toISOString(),
+            latencyMs: Date.now() - startedAt,
+            cacheHit: reading.fromCache === true,
+            lastError: null,
+          };
+        }
+
+        if (!candidateStatuses.includes("unknown")) {
+          // The Vox answered explicitly. An offline login means AutoDJ should
+          // remain normal; metadata is only the fallback when Vox is unavailable.
+          return {
+            classification: "unknown",
+            source: "vox",
+            reason: "vox-offline",
+            vox,
+            observedAt: new Date().toISOString(),
+            latencyMs: Date.now() - startedAt,
+            cacheHit: reading.fromCache === true,
+            lastError: null,
+          };
+        }
+      }
+    } catch {
+      // A provider failure is never proof that a DJ disconnected. The existing
+      // Shoutcast / metadata detector remains the contingency path.
+      vox = { statuses: {}, unavailable: true };
+    }
+  }
 
   try {
     const metadata = await fetchPrimaryStreamMetadata();
@@ -458,6 +514,8 @@ async function fetchDjDetectionObservation() {
       source: "metadata",
       songTitle: metadata.songTitle,
       marker,
+      vox,
+      voxUnavailable: vox?.unavailable === true,
       reason: marker ? "marker" : !normalizePublicText(metadata.songTitle) ? "empty" : isTechnicalTrack(metadata.songTitle) ? "technical" : "music",
       observedAt: new Date().toISOString(),
       latencyMs: Date.now() - startedAt,
@@ -470,9 +528,11 @@ async function fetchDjDetectionObservation() {
       const marker = parseLiveDjMarker(songTitle);
       return {
         classification: marker ? "no-metadata" : classifyDjMetadata(songTitle),
-        source: "shoutcast",
-        songTitle,
-        marker,
+      source: "shoutcast",
+      songTitle,
+      marker,
+      vox,
+      voxUnavailable: vox?.unavailable === true,
         streamIdentity: `${stats.streamsource ?? ""}|${stats.streamuptime ?? ""}`,
         reason: marker ? "marker" : !normalizePublicText(songTitle) ? "empty" : isTechnicalTrack(songTitle) ? "technical" : "music",
         observedAt: new Date().toISOString(),
@@ -484,8 +544,10 @@ async function fetchDjDetectionObservation() {
         classification: "unknown",
         source: "none",
         observedAt: new Date().toISOString(),
-        latencyMs: Date.now() - startedAt,
-        lastError: publicDetectionError(fallbackError || primaryError),
+      latencyMs: Date.now() - startedAt,
+      lastError: publicDetectionError(fallbackError || primaryError),
+      vox,
+      voxUnavailable: vox?.unavailable === true,
       };
     }
   }
@@ -791,10 +853,10 @@ async function handleNowPlaying() {
 }
 
 function liveStateCacheHeaders(snapshot) {
-  const configuredSeconds = snapshot?.config?.enabled && (snapshot?.eligibleDj || snapshot?.liveDj?.isLive)
+  const configuredSeconds = snapshot?.config?.enabled && (snapshot?.isDetectionWindowActive || snapshot?.liveDj?.isLive)
     ? Number(snapshot.config.pollSeconds) || 15
     : 60;
-  const boundary = snapshot?.sessionEndsAt || snapshot?.nextEligibleAt;
+  const boundary = snapshot?.sessionEndsAt || snapshot?.nextDetectionAt || snapshot?.nextEligibleAt;
   const untilBoundary = boundary ? Math.max(1, Math.ceil((Date.parse(boundary) - Date.now()) / 1_000)) : configuredSeconds;
   const pollSeconds = Math.max(1, Math.min(configuredSeconds, untilBoundary));
   return publicCacheHeaders({
@@ -840,10 +902,14 @@ function publicLiveStatePayload(snapshot) {
     config: {
       enabled: snapshot?.config?.enabled !== false,
       pollSeconds: Number(snapshot?.config?.pollSeconds) || 15,
+      earlyWindowMinutes: Number(snapshot?.config?.earlyWindowMinutes ?? 30),
+      panelRefreshSeconds: Number(snapshot?.config?.panelRefreshSeconds ?? 30),
       enterConfirmations: Number(snapshot?.config?.enterConfirmations) || 3,
       exitConfirmations: Number(snapshot?.config?.exitConfirmations) || 2,
     },
     nextEligibleAt: snapshot?.nextEligibleAt || null,
+    nextDetectionAt: snapshot?.nextDetectionAt || null,
+    isDetectionWindowActive: snapshot?.isDetectionWindowActive === true,
     sessionEndsAt: snapshot?.sessionEndsAt || null,
     expectedEndAt: snapshot?.expectedEndAt || null,
     isOverrun: snapshot?.isOverrun === true,
@@ -856,12 +922,20 @@ function adminDjDetectionPayload(snapshot) {
   const payload = publicLiveStatePayload(snapshot);
   return {
     ...payload,
+    state: {
+      ...payload.state,
+      lastTransition: snapshot?.state?.lastTransition || null,
+      lastTransitionAt: snapshot?.state?.lastTransitionAt || null,
+      lastTransitionReason: snapshot?.state?.lastTransitionReason || null,
+    },
     diagnostic: snapshot?.diagnostic || {
       classification: snapshot?.state?.classification || "unknown",
       source: snapshot?.state?.source || "none",
       observedAt: snapshot?.state?.observedAt || null,
       latencyMs: snapshot?.state?.latencyMs || null,
+      cacheHit: false,
       lastError: snapshot?.state?.lastError || null,
+      voxUnavailable: snapshot?.state?.voxUnavailable === true,
       confidence: Number(snapshot?.state?.confidence || 0),
       signals: Array.isArray(snapshot?.state?.signals) ? snapshot.state.signals : [],
     },
@@ -873,15 +947,15 @@ async function evaluateDjDetection({ probe = false } = {}) {
   const manualIsLive = snapshot.liveDj?.source === "manual";
   const confirmationNeedsMonitoring = snapshot.state?.activation === "confirmation" && snapshot.liveDj?.isLive;
   const shouldObserve = Boolean(
-    snapshot.eligibleDj &&
+    snapshot.isDetectionWindowActive &&
     !manualIsLive &&
     (snapshot.config?.enabled || confirmationNeedsMonitoring) &&
     (probe || isDjDetectionDue(snapshot)),
   );
 
   if (shouldObserve) {
-    snapshot = await advanceDjDetectionObservation(await fetchDjDetectionObservation());
-  } else if (!snapshot.liveDj?.isLive && !snapshot.eligibleDj && (snapshot.state?.mode !== "waiting" || snapshot.state?.djId)) {
+    snapshot = await advanceDjDetectionObservation(await fetchDjDetectionObservation(snapshot));
+  } else if (!snapshot.liveDj?.isLive && !snapshot.isDetectionWindowActive && (snapshot.state?.mode !== "waiting" || snapshot.state?.djId)) {
     snapshot = await advanceDjDetectionObservation({
       classification: "unknown",
       source: "none",
@@ -912,8 +986,17 @@ async function handlePublicLiveState() {
       liveDj: null,
       eligibleDj: null,
       state: { mode: "waiting", djId: null, enterCount: 0, exitCount: 0, classification: "unknown", source: "none", observedAt: null, updatedAt: null },
-      config: { enabled: true, pollSeconds: 60, enterConfirmations: 3, exitConfirmations: 2 },
+      config: {
+        enabled: true,
+        pollSeconds: 60,
+        earlyWindowMinutes: 30,
+        panelRefreshSeconds: 30,
+        enterConfirmations: 3,
+        exitConfirmations: 2,
+      },
       nextEligibleAt: null,
+      nextDetectionAt: null,
+      isDetectionWindowActive: false,
       sessionEndsAt: null,
       expectedEndAt: null,
       isOverrun: false,
@@ -1493,6 +1576,61 @@ async function handleDjDetection(event, pathname) {
   return methodNotAllowed();
 }
 
+async function voxIntegrationPayload({ probe = false, djId = "" } = {}) {
+  const integration = await getVoxIntegrationStatus();
+  if (!probe || !integration.enabled || !integration.passwordConfigured || !integration.encryptionReady) {
+    return { integration, djStatuses: [] };
+  }
+
+  const credentials = await getVoxIntegrationCredentials();
+  if (!credentials) return { integration, djStatuses: [] };
+  const [reading, djs] = await Promise.all([
+    // The shared 15-second cache makes repeated clicks inexpensive.
+    readVoxDjConnectionSnapshot(credentials),
+    listAdminDjs(),
+  ]);
+  const requestedDjId = String(djId || "").trim();
+  return {
+    integration,
+    // The protected login is only used for the lookup and never returned to the client.
+    djStatuses: djs
+      .filter((dj) => dj.voxLogin && (!requestedDjId || dj.id === requestedDjId))
+      .map((dj) => ({ id: dj.id, status: reading.statuses[normalizeVoxLogin(dj.voxLogin)]?.status || "unknown" })),
+  };
+}
+
+async function handleVoxIntegration(event, pathname) {
+  if (pathname !== "/vox-integration") return json(404, { ok: false, message: "Conexão Vox não encontrada." });
+  if (!isAdminRequest(event)) return unauthorized();
+
+  const method = event.httpMethod || "GET";
+  if (method === "GET") {
+    const url = new URL(event.rawUrl || `https://local${event.path || "/api/vox-integration"}`);
+    try {
+      return json(200, {
+        ok: true,
+        ...(await voxIntegrationPayload({
+          probe: url.searchParams.get("probe") === "1",
+          djId: url.searchParams.get("djId") || "",
+        })),
+      });
+    } catch (error) {
+      return serverError(error, "Não foi possível consultar a conexão Vox.");
+    }
+  }
+
+  if (method === "PUT") {
+    try {
+      const integration = await saveVoxIntegration(readJsonBody(event));
+      return json(200, { ok: true, integration, djStatuses: [] });
+    } catch (error) {
+      return serverError(error, "Não foi possível salvar a conexão Vox.");
+    }
+  }
+
+  return methodNotAllowed();
+}
+
 export async function handler(event) {
   connectNetlifyBlobs(event);
 
@@ -1506,6 +1644,7 @@ export async function handler(event) {
   if (pathname === "/djs" || pathname.startsWith("/djs/")) return handleDjs(event, pathname);
   if (pathname === "/live-status-test") return handleLiveStatusTest(event, pathname);
   if (pathname === "/dj-detection") return handleDjDetection(event, pathname);
+  if (pathname === "/vox-integration") return handleVoxIntegration(event, pathname);
 
   if (event.httpMethod && event.httpMethod !== "GET") {
     return methodNotAllowed();

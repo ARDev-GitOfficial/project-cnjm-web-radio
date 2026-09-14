@@ -16,6 +16,7 @@ export type StationDj = {
   signatures: string;
   djName: string;
   programName: string;
+  voxLogin: string;
   logoUrl: string;
   logoKey: string;
   logoWidth: number;
@@ -66,6 +67,8 @@ export type DjLiveState = {
   state: DjDetectionState;
   config: DjDetectionConfig;
   nextEligibleAt: string | null;
+  nextDetectionAt: string | null;
+  isDetectionWindowActive: boolean;
   sessionEndsAt: string | null;
   expectedEndAt: string | null;
   isOverrun: boolean;
@@ -76,11 +79,26 @@ export type DjLiveState = {
     source: DjDetectionState["source"];
     observedAt: string | null;
     latencyMs: number | null;
+    cacheHit: boolean;
     lastError: string | null;
+    voxUnavailable?: boolean;
     confidence: number;
     signals: string[];
   };
   message?: string;
+};
+
+export type VoxConnectionStatus = {
+  enabled: boolean;
+  port: string;
+  passwordConfigured: boolean;
+  encryptionReady: boolean;
+  updatedAt: string | null;
+};
+
+export type VoxIntegrationPayload = {
+  integration: VoxConnectionStatus;
+  djStatuses: Array<{ id: string; status: "online" | "offline" | "unknown" }>;
 };
 
 type ApiDjsPayload = {
@@ -95,11 +113,15 @@ type ApiDjsPayload = {
   state?: Partial<DjDetectionState> | null;
   config?: Partial<DjDetectionConfig> | null;
   nextEligibleAt?: string | null;
+  nextDetectionAt?: string | null;
+  isDetectionWindowActive?: boolean;
   sessionEndsAt?: string | null;
   expectedEndAt?: string | null;
   isOverrun?: boolean;
   version?: string;
   diagnostic?: DjLiveState["diagnostic"];
+  integration?: Partial<VoxConnectionStatus>;
+  djStatuses?: VoxIntegrationPayload["djStatuses"];
   image?: {
     imageKey: string;
     imageUrl: string;
@@ -152,6 +174,7 @@ export const emptyDj = (): StationDj => {
     signatures: "",
     djName: "",
     programName: "",
+    voxLogin: "",
     logoUrl: "",
     logoKey: "",
     logoWidth: 0,
@@ -182,6 +205,7 @@ export function normalizeDj(dj: Partial<StationDj>): StationDj {
     signatures: normalizeSignatures(dj.signatures || ""),
     djName: String(dj.djName || "").trim(),
     programName: String(dj.programName || "").trim(),
+    voxLogin: normalizeVoxDjLogin(dj.voxLogin),
     logoUrl: normalizeDjLogoUrl(dj.logoUrl),
     logoKey: String(dj.logoKey || "").trim(),
     logoWidth: normalizeWholeNumber(dj.logoWidth, 0, 0, 1024),
@@ -338,6 +362,48 @@ export async function saveDjDetectionConfig(token: string, config: DjDetectionCo
   return {
     liveStatusTest: normalizeLiveStatusTest(payload.liveStatusTest || {}),
     liveState: hydrateDjLiveState(payload),
+  };
+}
+
+export async function fetchVoxIntegrationStatus(
+  token: string,
+  probe = false,
+  signal?: AbortSignal,
+  djId?: string,
+): Promise<VoxIntegrationPayload> {
+  const params = new URLSearchParams();
+  if (probe) params.set("probe", "1");
+  if (djId) params.set("djId", djId);
+  const query = params.toString();
+  const payload = await requestJson<ApiDjsPayload>(`/api/vox-integration${query ? `?${query}` : ""}`, {
+    signal,
+    headers: authHeaders(token),
+  });
+  return {
+    integration: normalizeVoxIntegrationStatus(payload.integration),
+    djStatuses: Array.isArray(payload.djStatuses)
+      ? payload.djStatuses
+        .map((entry) => ({
+          id: String(entry?.id || ""),
+          status: (entry?.status === "online" || entry?.status === "offline" ? entry.status : "unknown") as "online" | "offline" | "unknown",
+        }))
+        .filter((entry) => entry.id)
+      : [],
+  };
+}
+
+export async function saveVoxIntegration(
+  token: string,
+  payload: { enabled: boolean; port: string; password?: string; clearPassword?: boolean },
+): Promise<VoxIntegrationPayload> {
+  const response = await requestJson<ApiDjsPayload>("/api/vox-integration", {
+    method: "PUT",
+    headers: authHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  return {
+    integration: normalizeVoxIntegrationStatus(response.integration),
+    djStatuses: [],
   };
 }
 
@@ -545,6 +611,8 @@ function emptyDjDetectionConfig(): DjDetectionConfig {
   return {
     enabled: true,
     pollSeconds: 15,
+    earlyWindowMinutes: 30,
+    panelRefreshSeconds: 30,
     enterConfirmations: 3,
     exitConfirmations: 2,
     updatedAt: null,
@@ -554,9 +622,15 @@ function emptyDjDetectionConfig(): DjDetectionConfig {
 export function normalizeDjDetectionConfig(value: unknown): DjDetectionConfig {
   const item = value && typeof value === "object" ? value as Partial<DjDetectionConfig> : {};
   const pollSeconds = Number(item.pollSeconds);
+  const earlyWindowMinutes = Number(item.earlyWindowMinutes);
+  const panelRefreshSeconds = Number(item.panelRefreshSeconds);
   return {
     enabled: item.enabled !== false,
     pollSeconds: pollSeconds === 30 || pollSeconds === 60 ? pollSeconds : 15,
+    earlyWindowMinutes: earlyWindowMinutes === 0 || earlyWindowMinutes === 15 || earlyWindowMinutes === 45 || earlyWindowMinutes === 60
+      ? earlyWindowMinutes
+      : 30,
+    panelRefreshSeconds: panelRefreshSeconds === 15 || panelRefreshSeconds === 60 ? panelRefreshSeconds : 30,
     enterConfirmations: normalizeWholeNumber(item.enterConfirmations, 3, 1, 5),
     exitConfirmations: normalizeWholeNumber(item.exitConfirmations, 2, 1, 5),
     updatedAt: normalizeIsoString(item.updatedAt) || null,
@@ -586,6 +660,10 @@ function emptyDjDetectionState(): DjDetectionState {
     observedAt: null,
     latencyMs: null,
     lastError: null,
+    voxUnavailable: false,
+    lastTransition: null,
+    lastTransitionAt: null,
+    lastTransitionReason: null,
     updatedAt: null,
   };
 }
@@ -600,13 +678,13 @@ function normalizeDjDetectionState(value: unknown): DjDetectionState {
     enterCount: normalizeWholeNumber(item.enterCount, 0, 0, 5),
     exitCount: normalizeWholeNumber(item.exitCount, 0, 0, 5),
     confidence: normalizeWholeNumber(item.confidence, 0, 0, 100),
-    activation: item.activation === "automatic" || item.activation === "marker" || item.activation === "confirmation"
+    activation: item.activation === "automatic" || item.activation === "marker" || item.activation === "confirmation" || item.activation === "vox"
       ? item.activation
       : null,
     classification: item.classification === "music" || item.classification === "no-metadata" || item.classification === "unknown"
       ? item.classification
       : null,
-    source: item.source === "metadata" || item.source === "shoutcast" || item.source === "marker" || item.source === "confirmation"
+    source: item.source === "metadata" || item.source === "shoutcast" || item.source === "marker" || item.source === "confirmation" || item.source === "vox"
       ? item.source
       : "none",
     expectedEndAt: normalizeIsoString(item.expectedEndAt) || null,
@@ -622,6 +700,10 @@ function normalizeDjDetectionState(value: unknown): DjDetectionState {
     observedAt: normalizeIsoString(item.observedAt) || null,
     latencyMs: Number.isFinite(Number(item.latencyMs)) ? Math.max(0, Math.round(Number(item.latencyMs))) : null,
     lastError: String(item.lastError || "").trim() || null,
+    voxUnavailable: item.voxUnavailable === true,
+    lastTransition: String(item.lastTransition || "").trim() || null,
+    lastTransitionAt: normalizeIsoString(item.lastTransitionAt) || null,
+    lastTransitionReason: String(item.lastTransitionReason || "").trim() || null,
     updatedAt: normalizeIsoString(item.updatedAt) || null,
   };
 }
@@ -647,6 +729,8 @@ function emptyDjLiveState(message?: string): DjLiveState {
     state: emptyDjDetectionState(),
     config: emptyDjDetectionConfig(),
     nextEligibleAt: null,
+    nextDetectionAt: null,
+    isDetectionWindowActive: false,
     sessionEndsAt: null,
     expectedEndAt: null,
     isOverrun: false,
@@ -675,6 +759,8 @@ function hydrateDjLiveState(payload: ApiDjsPayload): DjLiveState {
     state: normalizeDjDetectionState(payload.state),
     config: normalizeDjDetectionConfig(payload.config),
     nextEligibleAt: normalizeIsoString(payload.nextEligibleAt) || null,
+    nextDetectionAt: normalizeIsoString(payload.nextDetectionAt) || null,
+    isDetectionWindowActive: payload.isDetectionWindowActive === true,
     sessionEndsAt: normalizeIsoString(payload.sessionEndsAt) || null,
     expectedEndAt: normalizeIsoString(payload.expectedEndAt) || null,
     isOverrun: payload.isOverrun === true,
@@ -708,6 +794,22 @@ function normalizeSignatures(value: string) {
     .filter((signature, index, list) => list.indexOf(signature) === index)
     .slice(0, 12)
     .join("\n");
+}
+
+function normalizeVoxDjLogin(value: unknown) {
+  const login = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9._-]{1,64}$/.test(login) ? login : "";
+}
+
+function normalizeVoxIntegrationStatus(value: unknown): VoxConnectionStatus {
+  const item = value && typeof value === "object" ? value as Partial<VoxConnectionStatus> : {};
+  return {
+    enabled: item.enabled === true,
+    port: /^\d{2,5}$/.test(String(item.port || "")) ? String(item.port) : "",
+    passwordConfigured: item.passwordConfigured === true,
+    encryptionReady: item.encryptionReady === true,
+    updatedAt: normalizeIsoString(item.updatedAt) || null,
+  };
 }
 
 export function normalizeLiveStatusTest(payload: Partial<LiveStatusTestPayload>): LiveStatusTestPayload {

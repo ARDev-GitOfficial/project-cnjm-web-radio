@@ -87,6 +87,7 @@ import {
   emptyManualLiveDjSchedule,
   fetchAdminDjs,
   fetchDjDetectionStatus,
+  fetchVoxIntegrationStatus,
   fetchLiveStatusTest,
   AUDIENCE_DAY_IDS,
   loadDjs,
@@ -115,12 +116,14 @@ import {
   setRemoteDjSkippedToday,
   saveRemoteDj,
   saveRemoteLiveStatusTest,
+  saveVoxIntegration,
   uploadDjLogo,
   writeLiveStatusTest,
   type DjsPayload,
   type LiveStatusTestPayload,
   type LiveStatusTestResponse,
   type StationDj,
+  type VoxIntegrationPayload,
 } from "../lib/liveDjs";
 import type { AudienceDjProfile, AudienceScheduleProfile, ManualLiveDjControl, ManualLiveDjSchedule } from "../types";
 
@@ -145,6 +148,11 @@ type VisitorCounterDraft = {
   visitorGrowthPercent: number;
 };
 
+type VoxIntegrationDraft = {
+  enabled: boolean;
+  port: string;
+};
+
 // Legacy schedule payloads remain readable until the authenticated migration rewrites them into DJ records.
 type DjScheduleDraft = {
   enabled: boolean;
@@ -154,7 +162,7 @@ type DjScheduleDraft = {
 };
 
 type AdminPanel = "dashboard" | "ads" | "programs" | "djs" | "visits" | "reports" | "api";
-type AdminResource = "ads" | "programs" | "djs" | "audience" | "detection";
+type AdminResource = "ads" | "programs" | "djs" | "audience" | "detection" | "vox";
 type AdminActivityStatus = "saving" | "confirming" | "complete" | "error";
 
 type AdminActivityItem = {
@@ -272,6 +280,8 @@ export function AdsAdminPage() {
   const [audienceDraft, setAudienceDraft] = useState<LiveStatusTestPayload>(() => readLiveStatusTest());
   const [visitorDraft, setVisitorDraft] = useState<VisitorCounterDraft>(() => visitorCounterDraftFrom(readLiveStatusTest()));
   const [djDetectionDraft, setDjDetectionDraft] = useState(() => normalizeDjDetectionConfig(readLiveStatusTest().djDetectionConfig));
+  const [voxDraft, setVoxDraft] = useState<VoxIntegrationDraft>({ enabled: false, port: "" });
+  const [voxPassword, setVoxPassword] = useState("");
   const [simulationNow, setSimulationNow] = useState(() => Date.now());
   const [activityLog, setActivityLog] = useState<AdminActivityItem[]>([]);
   const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
@@ -280,7 +290,11 @@ export function AdsAdminPage() {
   const activitySequenceRef = useRef(0);
   const [isAudienceSaving, setIsAudienceSaving] = useState(false);
   const [isDjDetectionSaving, setIsDjDetectionSaving] = useState(false);
+  const [isVoxSaving, setIsVoxSaving] = useState(false);
   const [djDetectionDiagnostic, setDjDetectionDiagnostic] = useState<Awaited<ReturnType<typeof fetchDjDetectionStatus>> | null>(null);
+  const [djVoxProbeById, setDjVoxProbeById] = useState<Record<string, "online" | "offline" | "unknown">>({});
+  const [djVoxProbeAtById, setDjVoxProbeAtById] = useState<Record<string, number>>({});
+  const panelRefreshSeconds = normalizeDjDetectionConfig(liveTest.djDetectionConfig).panelRefreshSeconds;
   const { data, isFetching } = useQuery({
     queryKey: ["ads-admin", session?.token, session?.source],
     enabled: Boolean(session && shouldLoadAds),
@@ -373,6 +387,17 @@ export function AdsAdminPage() {
     enabled: Boolean(session?.source === "blobs" && (isDashboard || activePanel === "api" || activePanel === "djs")),
     queryFn: async ({ signal }) => fetchDjDetectionStatus(session?.token || "", false, signal),
     staleTime: ADMIN_QUERY_STALE_TIME_MS,
+    refetchInterval: activePanel === "djs" ? panelRefreshSeconds * 1_000 : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+  const { data: voxIntegrationData, isFetching: isFetchingVoxIntegration } = useQuery({
+    queryKey: ["vox-integration-admin", session?.token, session?.source],
+    enabled: Boolean(session?.source === "blobs" && (activePanel === "api" || activePanel === "djs")),
+    queryFn: async ({ signal }) => fetchVoxIntegrationStatus(session?.token || "", false, signal),
+    staleTime: ADMIN_QUERY_STALE_TIME_MS,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     retry: false,
@@ -384,6 +409,13 @@ export function AdsAdminPage() {
   const currentProgram = programData?.currentProgram;
   const djs = djData?.djs ?? loadDjs();
   const djDetectionStatus = djDetectionDiagnostic || djDetectionData || null;
+  const voxDjStatusById = useMemo(
+    () => new Map([
+      ...(voxIntegrationData?.djStatuses || []).map((entry) => [entry.id, entry.status] as const),
+      ...Object.entries(djVoxProbeById),
+    ]),
+    [djVoxProbeById, voxIntegrationData?.djStatuses],
+  );
   const isDisconnected = Boolean(session?.source === "blobs" && data?.source === "fallback");
   const isRemote = Boolean(session?.source === "blobs" && !isDisconnected);
   const isLocalMode = Boolean(session?.source === "local");
@@ -450,6 +482,36 @@ export function AdsAdminPage() {
     () => JSON.stringify(visitorDraft) !== JSON.stringify(visitorCounterDraftFrom(liveTest)),
     [visitorDraft, liveTest],
   );
+  const djOperationsLiveDj = djDetectionStatus?.liveDj || savedConfiguredLiveDj || null;
+  const djOperationsState = djDetectionStatus?.state;
+  const scheduledDjsWithoutVox = useMemo(
+    () => djs.filter((dj) => dj.active && dj.scheduleEnabled && !dj.voxLogin.trim()),
+    [djs],
+  );
+  const djAttentionItems = useMemo(() => {
+    const items: string[] = [];
+    if (session?.source === "blobs" && !voxIntegrationData?.integration.enabled) {
+      items.push("Integração Vox desligada: a confirmação por conexão está indisponível.");
+    } else if (session?.source === "blobs" && !voxIntegrationData?.integration.encryptionReady) {
+      items.push("Chave de proteção do Vox ausente: conclua a conexão segura na aba Funcionamento da API.");
+    }
+    if (scheduledDjsWithoutVox.length) {
+      items.push(`${scheduledDjsWithoutVox.length} DJ(s) com agenda, mas sem login técnico para confirmação automática.`);
+    }
+    if (djDetectionStatus?.isOverrun) items.push("Há um DJ com horário previsto excedido. Mantenha no ar, estenda ou encerre a sessão.");
+    if (djDetectionStatus?.diagnostic?.voxUnavailable) items.push("Vox indisponível na última conferência. A detecção de contingência continua sem trocar o estado por erro de rede.");
+    if (djDetectionStatus?.diagnostic?.lastError) items.push("A última leitura da rádio não foi concluída. O painel mantém o último estado seguro.");
+    return items;
+  }, [djDetectionStatus?.diagnostic?.lastError, djDetectionStatus?.diagnostic?.voxUnavailable, djDetectionStatus?.isOverrun, scheduledDjsWithoutVox.length, session?.source, voxIntegrationData?.integration.enabled, voxIntegrationData?.integration.encryptionReady]);
+  const effectiveDjDetectionConfig = djDetectionStatus?.config || normalizeDjDetectionConfig(liveTest.djDetectionConfig);
+  const earlyWindowLabel = formatDjEarlyWindow(effectiveDjDetectionConfig.earlyWindowMinutes);
+  const currentPanelRefreshSeconds = effectiveDjDetectionConfig.panelRefreshSeconds;
+  const voxReadyForProbe = Boolean(
+    isRemote &&
+    voxIntegrationData?.integration.enabled &&
+    voxIntegrationData.integration.passwordConfigured &&
+    voxIntegrationData.integration.encryptionReady,
+  );
 
   useEffect(() => {
     if (!liveStatusData?.liveStatusTest) return;
@@ -483,6 +545,14 @@ export function AdsAdminPage() {
     liveStatusData?.liveStatusTest?.djDetectionConfig,
     liveStatusData?.liveStatusTest?.djSkips,
   ]);
+
+  useEffect(() => {
+    if (!voxIntegrationData?.integration) return;
+    setVoxDraft({
+      enabled: voxIntegrationData.integration.enabled,
+      port: voxIntegrationData.integration.port,
+    });
+  }, [voxIntegrationData?.integration.enabled, voxIntegrationData?.integration.port, voxIntegrationData?.integration.updatedAt]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setSimulationNow(Date.now()), 5_000);
@@ -531,13 +601,14 @@ export function AdsAdminPage() {
     setDjLogoUploadState({ status: "idle", message: "" });
   };
 
-  const refresh = useCallback(async (resources: AdminResource[] = ["ads", "programs", "djs", "audience", "detection"]) => {
+  const refresh = useCallback(async (resources: AdminResource[] = ["ads", "programs", "djs", "audience", "detection", "vox"]) => {
     const keys: Record<AdminResource, readonly unknown[]> = {
       ads: ["ads-admin"],
       programs: ["programs-admin"],
       djs: ["djs-admin"],
       audience: ["live-status-admin"],
       detection: ["dj-detection-admin"],
+      vox: ["vox-integration-admin"],
     };
 
     await Promise.all(resources.map((resource) => queryClient.invalidateQueries({ queryKey: keys[resource] })));
@@ -1277,6 +1348,94 @@ export function AdsAdminPage() {
     }
   };
 
+  const saveVoxConnection = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!session || session.source !== "blobs") {
+      setActionMessage("A conexão segura com o Vox exige o conteúdo global conectado.");
+      return;
+    }
+
+    const activityId = beginActivity("Conexão segura com o Vox");
+    setIsVoxSaving(true);
+    try {
+      const saved = await saveVoxIntegration(session.token, {
+        enabled: voxDraft.enabled,
+        port: voxDraft.port,
+        password: voxPassword || undefined,
+      });
+      setVoxPassword("");
+      queryClient.setQueryData<VoxIntegrationPayload>(
+        ["vox-integration-admin", session.token, session.source],
+        saved,
+      );
+      setActionMessage(saved.integration.enabled
+        ? "Conexão do Vox salva com senha protegida."
+        : "Conexão do Vox salva e mantida desligada.");
+      await confirmActivity(activityId, ["vox", "detection"], "Conexão Vox confirmada");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível salvar a conexão Vox.";
+      setActionMessage(message);
+      failActivity(activityId, message);
+    } finally {
+      setIsVoxSaving(false);
+    }
+  };
+
+  const testVoxConnection = async () => {
+    if (!session || session.source !== "blobs") return;
+    if (!voxIntegrationData?.integration.enabled || !voxIntegrationData.integration.passwordConfigured || !voxIntegrationData.integration.encryptionReady) {
+      setActionMessage("Conclua a conexão segura do Vox na aba Funcionamento da API antes de testar.");
+      return;
+    }
+    const activityId = beginActivity("Consulta de conexões no Vox");
+    try {
+      const result = await fetchVoxIntegrationStatus(session.token, true);
+      queryClient.setQueryData<VoxIntegrationPayload>(
+        ["vox-integration-admin", session.token, session.source],
+        result,
+      );
+      setActionMessage(result.djStatuses.length
+        ? "Status dos DJs conferido diretamente no Vox."
+        : "Conexão conferida. Cadastre o login Vox em cada DJ para associar o status.");
+      await confirmActivity(activityId, ["vox"], "Status Vox atualizado");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível consultar o Vox.";
+      setActionMessage(message);
+      failActivity(activityId, message);
+    }
+  };
+
+  const testDjVoxConnection = async (dj: StationDj) => {
+    if (!session || session.source !== "blobs") {
+      setActionMessage("O teste de conexão exige o conteúdo global conectado.");
+      return;
+    }
+    if (!dj.voxLogin.trim()) {
+      setActionMessage("Cadastre o login técnico deste DJ antes de testar a conexão.");
+      return;
+    }
+
+    const activityId = beginActivity(`Teste de conexão: ${dj.djName}`);
+    try {
+      const result = await fetchVoxIntegrationStatus(session.token, true, undefined, dj.id);
+      const status = result.djStatuses.find((entry) => entry.id === dj.id)?.status || "unknown";
+      setDjVoxProbeById((current) => ({ ...current, [dj.id]: status }));
+      setDjVoxProbeAtById((current) => ({ ...current, [dj.id]: Date.now() }));
+      setActionMessage(
+        status === "online"
+          ? `${dj.djName} está conectado no Vox.`
+          : status === "offline"
+            ? `${dj.djName} está desconectado no Vox.`
+            : `O Vox ainda não retornou um estado confiável para ${dj.djName}.`,
+      );
+      await confirmActivity(activityId, ["detection"], "Teste de conexão concluído");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Não foi possível testar a conexão deste DJ.";
+      setActionMessage(message);
+      failActivity(activityId, message);
+    }
+  };
+
   const controlDjSession = async (
     dj: StationDj,
     action: "confirm" | "acknowledge" | "end" | "extend",
@@ -1663,10 +1822,10 @@ export function AdsAdminPage() {
           : activePanel === "reports"
             ? ["djs", "audience"]
           : activePanel === "api"
-            ? ["djs", "audience", "detection"]
+            ? ["djs", "audience", "detection", "vox"]
             : ["audience"];
   const pendingActivityCount = activityLog.filter((item) => item.status === "saving" || item.status === "confirming").length;
-  const isPanelRefreshing = isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus || isFetchingDjDetection;
+  const isPanelRefreshing = isFetching || isFetchingPrograms || isFetchingDjs || isFetchingLiveStatus || isFetchingDjDetection || isFetchingVoxIntegration;
 
   const refreshCurrentPanel = () => {
     const activityId = beginActivity("Atualização do painel");
@@ -1920,10 +2079,36 @@ export function AdsAdminPage() {
 
               <div className="audience-field-grid compact">
                 <label>
-                  Intervalo de verificação
+                  Consulta de detecção
                   <select
                     value={djDetectionDraft.pollSeconds}
                     onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, pollSeconds: Number(event.currentTarget.value) as 15 | 30 | 60 })}
+                    disabled={!canManageLiveMetrics}
+                  >
+                    <option value={15}>15 segundos</option>
+                    <option value={30}>30 segundos</option>
+                    <option value={60}>60 segundos</option>
+                  </select>
+                </label>
+                <label>
+                  Antecipação da agenda
+                  <select
+                    value={djDetectionDraft.earlyWindowMinutes}
+                    onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, earlyWindowMinutes: Number(event.currentTarget.value) as 0 | 15 | 30 | 45 | 60 })}
+                    disabled={!canManageLiveMetrics}
+                  >
+                    <option value={0}>Na hora da entrada</option>
+                    <option value={15}>15 minutos antes</option>
+                    <option value={30}>30 minutos antes</option>
+                    <option value={45}>45 minutos antes</option>
+                    <option value={60}>60 minutos antes</option>
+                  </select>
+                </label>
+                <label>
+                  Atualização do painel
+                  <select
+                    value={djDetectionDraft.panelRefreshSeconds}
+                    onChange={(event) => setDjDetectionDraft({ ...djDetectionDraft, panelRefreshSeconds: Number(event.currentTarget.value) as 15 | 30 | 60 })}
                     disabled={!canManageLiveMetrics}
                   >
                     <option value={15}>15 segundos</option>
@@ -1956,8 +2141,9 @@ export function AdsAdminPage() {
               </div>
 
               <div className="audience-rule-list">
-                <p><CheckCircle2 size={15} /> Três leituras sem música válida entram em ao vivo por padrão.</p>
-                <p><RefreshCw size={15} /> Duas leituras musicais válidas encerram o ao vivo por padrão.</p>
+                <p><CheckCircle2 size={15} /> A antecipação abre apenas a janela em que o login do DJ pode ser confirmado pelo Vox.</p>
+                <p><RefreshCw size={15} /> A atualização do painel relê somente o estado salvo; ela não consulta o Vox por conta própria.</p>
+                <p><Radio size={15} /> A consulta de detecção é usada somente dentro da janela, durante uma transmissão ou em teste manual.</p>
                 <p><AlertTriangle size={15} /> Falhas e tempos esgotados nunca ligam ou desligam um DJ sozinhos.</p>
               </div>
 
@@ -1990,7 +2176,7 @@ export function AdsAdminPage() {
                 <p><Mic2 size={15} /> Elegível: {djDetectionStatus?.eligibleDj ? `${djDetectionStatus.eligibleDj.djName} · ${djDetectionStatus.eligibleDj.programName}` : "nenhum DJ neste horário"}</p>
                 <p><Activity size={15} /> Estado: {djDetectionStatus?.state.mode || "aguardando"} · confiança {djDetectionStatus?.state.confidence || 0}%</p>
                 <p><CheckCircle2 size={15} /> Leitura: {djDetectionStatus?.state.classification || "sem leitura"} · {djDetectionStatus?.state.activation || "automática"}</p>
-                <p><Database size={15} /> Origem: {djDetectionStatus?.diagnostic?.source || djDetectionStatus?.state.source || "nenhuma"} · {djDetectionStatus?.diagnostic?.latencyMs ?? djDetectionStatus?.state.latencyMs ?? "-"} ms</p>
+                <p><Database size={15} /> Origem: {djDetectionStatus?.diagnostic?.source || djDetectionStatus?.state.source || "nenhuma"} · {djDetectionStatus?.diagnostic?.latencyMs ?? djDetectionStatus?.state.latencyMs ?? "-"} ms{djDetectionStatus?.diagnostic?.cacheHit ? " · cache compartilhado" : ""}</p>
                 {(djDetectionStatus?.diagnostic?.signals || djDetectionStatus?.state.signals || []).map((signal) => (
                   <p key={signal}><CheckCircle2 size={15} /> {signal}</p>
                 ))}
@@ -1999,6 +2185,89 @@ export function AdsAdminPage() {
                 ) : null}
               </div>
               <small>O teste registra somente o estado necessário para confirmar entrada ou saída. Título, artista, capa e histórico não são armazenados aqui.</small>
+            </aside>
+          </section>
+
+          <section className="audience-admin-grid">
+            <form className="audience-control-panel" onSubmit={saveVoxConnection}>
+              <div className="editor-head">
+                <div>
+                  <span><Lock size={15} /> Conexão privada</span>
+                  <h2>Status confirmado pelo Vox</h2>
+                </div>
+              </div>
+              <label className="check-line audience-switch">
+                <input
+                  type="checkbox"
+                  checked={voxDraft.enabled}
+                  onChange={(event) => setVoxDraft({ ...voxDraft, enabled: event.currentTarget.checked })}
+                  disabled={session?.source !== "blobs" || isVoxSaving}
+                />
+                Usar a conexão do Vox para confirmar DJs agendados
+              </label>
+              <div className="audience-field-grid compact">
+                <label>
+                  Porta principal da rádio
+                  <input
+                    inputMode="numeric"
+                    value={voxDraft.port}
+                    onChange={(event) => setVoxDraft({ ...voxDraft, port: event.currentTarget.value.replace(/\D/g, "").slice(0, 5) })}
+                    placeholder="7586"
+                    disabled={session?.source !== "blobs" || isVoxSaving}
+                  />
+                </label>
+                <label>
+                  Senha do painel Vox
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={voxPassword}
+                    onChange={(event) => setVoxPassword(event.currentTarget.value)}
+                    placeholder={voxIntegrationData?.integration.passwordConfigured ? "Senha protegida já salva" : "Digite para proteger"}
+                    disabled={session?.source !== "blobs" || isVoxSaving}
+                  />
+                </label>
+              </div>
+              <div className="audience-rule-list">
+                <p><Lock size={15} /> A senha é cifrada no servidor e nunca volta para este painel.</p>
+                <p><Database size={15} /> A sessão do Vox é reutilizada por até 10 minutos; a leitura de conexões é compartilhada por 15 segundos e não expõe logins ao público.</p>
+                {!voxIntegrationData?.integration.encryptionReady ? (
+                  <p><AlertTriangle size={15} /> Falta configurar a chave privada de criptografia deste ambiente.</p>
+                ) : null}
+              </div>
+              <div className="audience-control-actions">
+                <button className="play-main slim" type="submit" disabled={session?.source !== "blobs" || isVoxSaving}>
+                  <Save size={16} /> {isVoxSaving ? "Protegendo..." : "Salvar conexão"}
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => { void testVoxConnection(); }}
+                  disabled={session?.source !== "blobs" || isVoxSaving || isFetchingVoxIntegration || !voxIntegrationData?.integration.enabled}
+                >
+                  <RefreshCw size={16} /> Testar status
+                </button>
+              </div>
+            </form>
+
+            <aside className="audience-preview-panel">
+              <div className="editor-head">
+                <div>
+                  <span><Mic2 size={15} /> Associação por DJ</span>
+                  <h2>Leitura segura de conexão</h2>
+                </div>
+              </div>
+              <div className="audience-rule-list">
+                <p><CheckCircle2 size={15} /> Cadastre o login técnico no cartão de cada DJ, por exemplo `conexaojamaica`.</p>
+                <p><CalendarDays size={15} /> O Vox reconhece o DJ {formatDjEarlyWindow(djDetectionDraft.earlyWindowMinutes)} e mantém quem continua conectado após o horário previsto.</p>
+                <p><Activity size={15} /> Um próximo DJ conectado assume na hora; falha no Vox não derruba um DJ sozinho.</p>
+                {(voxIntegrationData?.djStatuses || []).map((entry) => {
+                  const dj = djs.find((item) => item.id === entry.id);
+                  if (!dj) return null;
+                  return <p key={entry.id}><Radio size={15} /> {dj.djName}: {entry.status === "online" ? "conectado" : entry.status === "offline" ? "desconectado" : "sem leitura"}</p>;
+                })}
+              </div>
+              <small>O login usado para a conferência é técnico e fica restrito ao conteúdo privado. O site público recebe apenas DJ, programa, logo e status ao vivo.</small>
             </aside>
           </section>
         </section>
@@ -3090,6 +3359,67 @@ export function AdsAdminPage() {
       ) : null}
 
       {activePanel === "djs" ? (
+        <>
+        <section className="dj-operations-panel" aria-label="Situação operacional dos DJs">
+          <div className="dj-operations-head">
+            <div>
+              <span><Activity size={15} /> Operação ao vivo</span>
+              <h2>Central de DJs</h2>
+              <p>Estado salvo atualizado a cada {currentPanelRefreshSeconds} segundos. O Vox só é consultado durante uma janela de detecção, transmissão ou teste manual.</p>
+            </div>
+            <div className="dj-operations-actions">
+              <span className={isFetchingDjDetection ? "dj-sync-state is-busy" : "dj-sync-state"}>
+                <RefreshCw size={14} /> {isFetchingDjDetection ? "Atualizando estado" : "Estado sincronizado"}
+              </span>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => { void testVoxConnection(); }}
+                disabled={!voxReadyForProbe || isFetchingVoxIntegration}
+                title={voxReadyForProbe ? "Confere os logins dos DJs no Vox usando o cache compartilhado." : "Configure e proteja a conexão Vox na aba Funcionamento da API para testar."}
+              >
+                <RefreshCw size={15} /> Testar Vox agora
+              </button>
+              <NavLink className="ghost-button" to={adminPanelRoutes.api}>
+                <Settings2 size={15} /> Ajustar operação
+              </NavLink>
+            </div>
+          </div>
+          <div className="dj-operations-summary">
+            <article>
+              <span>Rádio</span>
+              <strong>{djOperationsLiveDj?.isLive ? "DJ conectado" : "AutoDJ"}</strong>
+              <small>{djOperationsLiveDj?.isLive ? `${djOperationsLiveDj.djName} · ${djOperationsLiveDj.programName}` : "Programação automática em operação"}</small>
+            </article>
+            <article>
+              <span>Próximo elegível</span>
+              <strong>{djDetectionStatus?.eligibleDj?.djName || "Sem janela agora"}</strong>
+              <small>{djDetectionStatus?.eligibleDj ? `${djDetectionStatus.eligibleDj.startTime} às ${djDetectionStatus.eligibleDj.endTime}` : `A agenda abre a detecção ${earlyWindowLabel}`}</small>
+            </article>
+            <article>
+              <span>Última transição</span>
+              <strong>{djOperationsState?.lastTransition || "Sem transição recente"}</strong>
+              <small>{djOperationsState?.lastTransitionAt ? `${formatRelativeTime(djOperationsState.lastTransitionAt)} · ${djOperationsState.lastTransitionReason || "Estado confirmado"}` : "Nenhum evento operacional salvo"}</small>
+            </article>
+            <article>
+              <span>Integração Vox</span>
+              <strong>{voxIntegrationData?.integration.enabled && voxIntegrationData.integration.encryptionReady ? "Protegida e pronta" : "Requer atenção"}</strong>
+              <small>{voxIntegrationData?.integration.enabled ? "Sessão temporária e cache compartilhado" : "Configure na Central da API"}</small>
+            </article>
+          </div>
+          <div className="dj-operation-guidance">
+            <span><CalendarDays size={15} /> Antecipação: <strong>{earlyWindowLabel}</strong></span>
+            <span><RefreshCw size={15} /> Painel: <strong>estado salvo a cada {currentPanelRefreshSeconds}s</strong></span>
+            <span><Database size={15} /> Vox: <strong>somente quando necessário</strong></span>
+          </div>
+          {djAttentionItems.length ? (
+            <div className="dj-attention-list" role="status">
+              {djAttentionItems.map((item) => <p key={item}><AlertTriangle size={15} /> {item}</p>)}
+            </div>
+          ) : (
+            <div className="dj-attention-list is-clear"><p><CheckCircle2 size={15} /> Nenhuma pendência operacional. A confirmação por conexão fica pronta quando houver uma janela elegível.</p></div>
+          )}
+        </section>
         <section className="admin-grid dj-admin-grid">
           <form className="ad-editor" onSubmit={saveDjDraft}>
             <div className="editor-head">
@@ -3244,6 +3574,18 @@ export function AdsAdminPage() {
                 <SlidersHorizontal size={14} /> Detecção automática opcional
               </summary>
               <label>
+                Login técnico no Vox
+                <input
+                  value={djDraft.voxLogin}
+                  onChange={(event) => setDjDraft({ ...djDraft, voxLogin: event.currentTarget.value.toLowerCase().replace(/\s+/g, "") })}
+                  placeholder="conexaojamaica"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+              </label>
+              <small>Quando este login conectar no Vox, o site confirma a entrada {earlyWindowLabel}, sem alterar o SAM Cast do DJ.</small>
+              <label>
                 Assinaturas técnicas
                 <textarea
                   rows={3}
@@ -3252,7 +3594,7 @@ export function AdsAdminPage() {
                   placeholder={"Nome que possa aparecer no servidor\nNome do programa"}
                 />
               </label>
-              <small>Opcional. Para reconhecimento imediato, configure o encoder com: AO VIVO | {djDraft.djName || "Nome do DJ"} | {djDraft.programName || "Nome do programa"}.</small>
+              <small>Opcional. Essas assinaturas servem apenas como reserva por metadados; o reconhecimento principal é a conexão já existente no Vox.</small>
             </details>
 
             <button className="play-main slim" type="submit" disabled={!canEditAds}>
@@ -3283,14 +3625,18 @@ export function AdsAdminPage() {
                     (detectedState?.mode === "live" || detectedState?.mode === "leaving" || detectedState?.mode === "overrun"),
                   );
                   const isDetectedOverrun = Boolean(isDetectedLive && djDetectionStatus?.isOverrun);
+                  const voxStatus = voxDjStatusById.get(dj.id);
+                  const lastProbeAt = djVoxProbeAtById[dj.id];
                   const detectionLabel = isManualLive
                     ? "Ao vivo manual"
                     : isDetectedOverrun
                       ? "Ao vivo · horário excedido"
                       : isDetectedLive
-                        ? detectedState?.mode === "leaving"
-                          ? "Ao vivo · confirmando saída"
-                          : detectedState?.activation === "marker"
+                          ? detectedState?.mode === "leaving"
+                            ? "Ao vivo · confirmando saída"
+                            : detectedState?.activation === "vox"
+                              ? "Ao vivo · conexão confirmada pelo Vox"
+                            : detectedState?.activation === "marker"
                             ? "Ao vivo · marcador do encoder"
                             : detectedState?.activation === "confirmation"
                               ? "Ao vivo · entrada confirmada"
@@ -3299,6 +3645,8 @@ export function AdsAdminPage() {
                           ? `Confirmando entrada ${detectedState.enterCount}/${djDetectionStatus?.config.enterConfirmations || 3}`
                           : isSkippedToday
                             ? "Sessão de hoje ignorada"
+                            : djDetectionStatus?.diagnostic?.voxUnavailable && (isCurrentDetectedDj || scheduleActive)
+                              ? "Vox indisponível · contingência ativa"
                             : scheduleActive
                               ? "Aguardando confirmação da API"
                               : dj.active
@@ -3307,13 +3655,22 @@ export function AdsAdminPage() {
                   return (
                     <article key={dj.id} className={dj.active ? "ad-list-item dj-list-item is-active" : "ad-list-item dj-list-item"}>
                       <span className={isManualLive ? "dj-avatar is-live" : "dj-avatar"}>
-                        {isManualLive ? <Radio size={20} /> : <Mic2 size={20} />}
+                        {dj.logoUrl
+                          ? <img src={dj.logoUrl} alt={`Logo de ${dj.programName || dj.djName}`} />
+                          : isManualLive ? <Radio size={20} /> : <Mic2 size={20} />}
                       </span>
                       <div>
                         <strong>{dj.djName || "DJ sem nome"}</strong>
                         <span>{dj.programName || "Programa sem nome"}</span>
                         <small>
                           {detectionLabel}
+                        </small>
+                        <small className="dj-card-status">
+                          {dj.voxLogin
+                            ? voxStatus
+                              ? `Vox: ${voxStatus === "online" ? "conectado" : voxStatus === "offline" ? "desconectado" : "sem leitura"}${lastProbeAt ? ` · confirmado ${formatRelativeTime(lastProbeAt)}` : ""}`
+                              : "Vox preparado · teste sob demanda"
+                            : scheduleActive ? "Login Vox pendente" : "Sem confirmação Vox"}
                         </small>
                       </div>
                       <span className={scheduleActive ? "dj-schedule-summary is-active" : "dj-schedule-summary"}>
@@ -3396,10 +3753,19 @@ export function AdsAdminPage() {
                         </button>
                         <button
                           type="button"
+                          onClick={() => { void testDjVoxConnection(dj); }}
+                          disabled={!voxReadyForProbe || !dj.voxLogin.trim() || isFetchingVoxIntegration}
+                          title="Confere apenas este DJ; cliques repetidos reaproveitam o cache compartilhado."
+                        >
+                          <RefreshCw size={15} /> Testar conexão
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => {
                             void removeDj(dj.id);
                           }}
-                          disabled={!canEditAds}
+                          disabled={!canEditAds || isManualLive || isDetectedLive}
+                          title={isManualLive || isDetectedLive ? "Encerre a sessão antes de excluir este DJ." : "Excluir DJ"}
                           aria-label="Excluir DJ"
                         >
                           <Trash2 size={15} />
@@ -3417,6 +3783,7 @@ export function AdsAdminPage() {
             )}
           </aside>
         </section>
+        </>
       ) : null}
 
       {cropFile ? (
@@ -3700,6 +4067,23 @@ function formatActivityTime(timestamp: number) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(timestamp));
+}
+
+function formatRelativeTime(value: string | number) {
+  const timestamp = typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "agora";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1_000));
+  if (seconds < 12) return "agora";
+  if (seconds < 60) return `há ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `há ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  return `há ${hours} h`;
+}
+
+function formatDjEarlyWindow(minutes: number) {
+  const normalized = Math.max(0, Math.round(Number(minutes) || 0));
+  return normalized === 0 ? "na hora da entrada" : `${normalized} min antes da entrada`;
 }
 
 function nextSimulationSeed() {

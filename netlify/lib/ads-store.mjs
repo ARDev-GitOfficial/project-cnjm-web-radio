@@ -1,5 +1,5 @@
 import { getStore } from "@netlify/blobs";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const AD_BANNER_WIDTH = 1700;
 export const AD_BANNER_HEIGHT = 450;
@@ -25,6 +25,8 @@ const LIVE_TEST_MAX_PERCENT = 200;
 const LIVE_TEST_MAX_GROWTH_PERCENT = 100;
 const LIVE_TEST_STATES = new Set(["online", "connecting", "offline", "live", "off"]);
 const DJ_DETECTION_POLL_SECONDS = new Set([15, 30, 60]);
+const DJ_DETECTION_EARLY_WINDOW_MINUTES = new Set([0, 15, 30, 45, 60]);
+const DJ_PANEL_REFRESH_SECONDS = new Set([15, 30, 60]);
 const DJ_DETECTION_MAX_CONFIRMATIONS = 5;
 const DJ_TITLE_STALE_MS = 90 * 1000;
 const AUDIENCE_DAY_IDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -181,7 +183,7 @@ async function readPublicDjsCache() {
   try {
     const cache = await adImageStore().get(PUBLIC_DJS_CACHE_KEY, { type: "json" });
     if (!Array.isArray(cache?.djs)) return null;
-    const djs = cache.djs.map(serializeDj).slice(0, MAX_DJS);
+    const djs = cache.djs.map(serializePublicDj).slice(0, MAX_DJS);
 
     publicDjsMemoryCache = {
       data: djs,
@@ -194,7 +196,7 @@ async function readPublicDjsCache() {
 }
 
 async function writePublicDjsCache(djs) {
-  const normalized = Array.isArray(djs) ? djs.map(serializeDj).slice(0, MAX_DJS) : [];
+  const normalized = Array.isArray(djs) ? djs.map(serializePublicDj).slice(0, MAX_DJS) : [];
   publicDjsMemoryCache = {
     data: normalized,
     savedAt: Date.now(),
@@ -258,7 +260,7 @@ async function writeLiveStatusCache(liveStatusTest) {
 
 function defaultSiteContent() {
   return {
-    version: 3,
+    version: 5,
     updatedAt: new Date().toISOString(),
     mediaMigrationVersion: 0,
     ads: [],
@@ -267,6 +269,7 @@ function defaultSiteContent() {
     djs: [],
     liveStatusTest: defaultLiveStatus(),
     djDetectionState: defaultDjDetectionState(),
+    voxIntegration: defaultVoxIntegration(),
   };
 }
 
@@ -278,7 +281,7 @@ function serializeSiteContent(value = {}) {
     liveStatusTest,
   );
   return {
-    version: 3,
+    version: 5,
     updatedAt: iso(value.updatedAt) || new Date().toISOString(),
     mediaMigrationVersion: Number(value.mediaMigrationVersion || 0) >= 1 ? 1 : 0,
     ads: Array.isArray(value.ads) ? value.ads.map(serializeAd).slice(0, MAX_ADS) : defaults.ads,
@@ -289,6 +292,7 @@ function serializeSiteContent(value = {}) {
     djs,
     liveStatusTest: clearLegacyDjConfiguration(liveStatusTest, djs),
     djDetectionState: normalizeDjDetectionState(value.djDetectionState),
+    voxIntegration: serializeVoxIntegration(value.voxIntegration),
   };
 }
 
@@ -337,11 +341,18 @@ async function readSiteContent({ forceRefresh = false } = {}) {
   return content;
 }
 
-async function publishSiteContent(content) {
+async function publishSiteContent(content, scope = "all") {
+  if (scope === "none") return;
+  if (scope === "live") {
+    await writeLiveStatusCache(content.liveStatusTest);
+    return;
+  }
+
   const now = new Date();
   const ads = visibleAds(content.ads, now);
-  const djs = content.djs.filter((dj) => dj.active).map(serializeDj).slice(0, MAX_DJS);
-  const programs = programsData(content.programs, { publicOnly: true, djs }).programs;
+  const allDjs = content.djs.filter((dj) => dj.active).map(serializeDj).slice(0, MAX_DJS);
+  const djs = allDjs.map(serializePublicDj);
+  const programs = programsData(content.programs, { publicOnly: true, djs: allDjs }).programs;
 
   await Promise.all([
     writePublicDataCache({ ads, settings: content.settings, programs, djs }),
@@ -350,17 +361,27 @@ async function publishSiteContent(content) {
   ]);
 }
 
-async function updateSiteContent(mutator) {
+function sameSiteContent(left, right) {
+  const normalizeForComparison = (content) => {
+    const normalized = cloneSiteContent(serializeSiteContent(content));
+    delete normalized.updatedAt;
+    return normalized;
+  };
+  return JSON.stringify(normalizeForComparison(left)) === JSON.stringify(normalizeForComparison(right));
+}
+
+async function updateSiteContent(mutator, { publish = "all" } = {}) {
   const write = async () => {
     const current = await readSiteContent({ forceRefresh: true });
     const next = serializeSiteContent(await mutator(cloneSiteContent(current)));
+    if (sameSiteContent(current, next)) return current;
     next.updatedAt = new Date().toISOString();
     await siteContentStore().setJSON(CONTENT_BLOB_KEY, next);
     siteContentMemoryCache = {
       content: next,
       savedAt: Date.now(),
     };
-    await publishSiteContent(next);
+    await publishSiteContent(next, publish);
     return next;
   };
 
@@ -438,6 +459,92 @@ function iso(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function defaultVoxIntegration() {
+  return {
+    enabled: false,
+    port: "",
+    passwordCiphertext: "",
+    updatedAt: null,
+  };
+}
+
+function normalizeVoxPort(value) {
+  const port = String(value || "").trim();
+  const numeric = Number(port);
+  return /^\d{2,5}$/.test(port) && Number.isInteger(numeric) && numeric > 0 && numeric <= 65_535 ? port : "";
+}
+
+function normalizeVoxDjLogin(value) {
+  const login = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9._-]{1,64}$/.test(login) ? login : "";
+}
+
+function serializeVoxIntegration(value) {
+  const item = value && typeof value === "object" ? value : {};
+  const passwordCiphertext = String(item.passwordCiphertext || "").trim();
+  return {
+    enabled: item.enabled === true,
+    port: normalizeVoxPort(item.port),
+    passwordCiphertext: /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(passwordCiphertext)
+      ? passwordCiphertext
+      : "",
+    updatedAt: iso(item.updatedAt),
+  };
+}
+
+function voxEncryptionKey() {
+  const encoded = String(process.env.CNJM_VOX_CREDENTIALS_ENCRYPTION_KEY || "").trim();
+  if (!encoded) {
+    throw new Error("Defina CNJM_VOX_CREDENTIALS_ENCRYPTION_KEY antes de salvar a senha do Vox.");
+  }
+
+  const key = /^[a-f0-9]{64}$/i.test(encoded)
+    ? Buffer.from(encoded, "hex")
+    : Buffer.from(encoded, "base64");
+  if (key.length !== 32) {
+    throw new Error("CNJM_VOX_CREDENTIALS_ENCRYPTION_KEY precisa ter 32 bytes em Base64 ou hexadecimal.");
+  }
+  return key;
+}
+
+function encryptVoxPassword(password) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", voxEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(password, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ["v1", iv.toString("base64url"), tag.toString("base64url"), encrypted.toString("base64url")].join(".");
+}
+
+function decryptVoxPassword(ciphertext) {
+  const parts = String(ciphertext || "").split(".");
+  if (parts.length !== 4 || parts[0] !== "v1") throw new Error("A senha protegida do Vox é inválida.");
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", voxEncryptionKey(), Buffer.from(parts[1], "base64url"));
+    decipher.setAuthTag(Buffer.from(parts[2], "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(parts[3], "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    throw new Error("Não foi possível ler a senha protegida do Vox. Confira a chave privada do ambiente.");
+  }
+}
+
+function publicVoxIntegrationStatus(value) {
+  const integration = serializeVoxIntegration(value);
+  let encryptionReady = false;
+  try {
+    voxEncryptionKey();
+    encryptionReady = true;
+  } catch {
+    // The UI should guide the administrator without exposing a secret or its validation details.
+  }
+  return {
+    enabled: integration.enabled,
+    port: integration.port,
+    passwordConfigured: Boolean(integration.passwordCiphertext),
+    encryptionReady,
+    updatedAt: integration.updatedAt,
+  };
+}
+
 export function normalizeAdPayload(ad = {}) {
   const now = new Date();
 
@@ -512,6 +619,7 @@ export function normalizeDjPayload(dj = {}) {
     signatures: normalizeDjSignatures(signatures).join("\n"),
     djName: String(dj.djName || "").trim(),
     programName: String(dj.programName || "").trim(),
+    voxLogin: normalizeVoxDjLogin(dj.voxLogin),
     logoUrl: normalizeManagedImageUrl(dj.logoUrl || ""),
     logoKey: normalizeWebpImageKey(dj.logoKey || ""),
     logoWidth: normalizeRunCount(dj.logoWidth, 0, 0, DJ_LOGO_SIZE),
@@ -597,6 +705,8 @@ function defaultDjDetectionConfig() {
   return {
     enabled: true,
     pollSeconds: 15,
+    earlyWindowMinutes: 30,
+    panelRefreshSeconds: 30,
     enterConfirmations: 3,
     exitConfirmations: 2,
     updatedAt: new Date().toISOString(),
@@ -606,9 +716,13 @@ function defaultDjDetectionConfig() {
 function normalizeDjDetectionConfig(value) {
   const item = value && typeof value === "object" ? value : {};
   const pollSeconds = Number(item.pollSeconds);
+  const earlyWindowMinutes = Number(item.earlyWindowMinutes);
+  const panelRefreshSeconds = Number(item.panelRefreshSeconds);
   return {
     enabled: item.enabled !== false,
     pollSeconds: DJ_DETECTION_POLL_SECONDS.has(pollSeconds) ? pollSeconds : 15,
+    earlyWindowMinutes: DJ_DETECTION_EARLY_WINDOW_MINUTES.has(earlyWindowMinutes) ? earlyWindowMinutes : 30,
+    panelRefreshSeconds: DJ_PANEL_REFRESH_SECONDS.has(panelRefreshSeconds) ? panelRefreshSeconds : 30,
     enterConfirmations: normalizeRunCount(item.enterConfirmations, 3, 1, DJ_DETECTION_MAX_CONFIRMATIONS),
     exitConfirmations: normalizeRunCount(item.exitConfirmations, 2, 1, DJ_DETECTION_MAX_CONFIRMATIONS),
     updatedAt: iso(item.updatedAt) || new Date().toISOString(),
@@ -638,6 +752,10 @@ function defaultDjDetectionState() {
     observedAt: null,
     latencyMs: null,
     lastError: null,
+    voxUnavailable: false,
+    lastTransition: null,
+    lastTransitionAt: null,
+    lastTransitionReason: null,
     updatedAt: null,
   };
 }
@@ -648,14 +766,14 @@ function normalizeDjDetectionState(value) {
   const classification = ["music", "no-metadata", "unknown"].includes(item.classification)
     ? item.classification
     : null;
-  const source = ["metadata", "shoutcast", "marker", "confirmation", "none"].includes(item.source) ? item.source : "none";
+  const source = ["metadata", "shoutcast", "marker", "confirmation", "vox", "none"].includes(item.source) ? item.source : "none";
   return {
     mode,
     djId: item.djId ? String(item.djId).trim() : null,
     enterCount: normalizeRunCount(item.enterCount, 0, 0, DJ_DETECTION_MAX_CONFIRMATIONS),
     exitCount: normalizeRunCount(item.exitCount, 0, 0, DJ_DETECTION_MAX_CONFIRMATIONS),
     confidence: normalizeRunCount(item.confidence, 0, 0, 100),
-    activation: ["automatic", "marker", "confirmation"].includes(item.activation) ? item.activation : null,
+    activation: ["automatic", "marker", "confirmation", "vox"].includes(item.activation) ? item.activation : null,
     classification,
     source,
     expectedEndAt: iso(item.expectedEndAt),
@@ -671,7 +789,47 @@ function normalizeDjDetectionState(value) {
     observedAt: iso(item.observedAt),
     latencyMs: Number.isFinite(Number(item.latencyMs)) ? Math.max(0, Math.round(Number(item.latencyMs))) : null,
     lastError: String(item.lastError || "").trim().slice(0, 240) || null,
+    voxUnavailable: item.voxUnavailable === true,
+    lastTransition: String(item.lastTransition || "").trim().slice(0, 120) || null,
+    lastTransitionAt: iso(item.lastTransitionAt),
+    lastTransitionReason: String(item.lastTransitionReason || "").trim().slice(0, 180) || null,
     updatedAt: iso(item.updatedAt),
+  };
+}
+
+function detectionStateWithTransition(previous, next, nowMs, explicit = null) {
+  const before = normalizeDjDetectionState(previous);
+  const after = normalizeDjDetectionState(next);
+  const startedLive = !isLiveDetectionMode(before.mode) && isLiveDetectionMode(after.mode);
+  const endedLive = isLiveDetectionMode(before.mode) && !isLiveDetectionMode(after.mode);
+  const becameOverrun = before.mode !== "overrun" && after.mode === "overrun";
+  const voxUnavailable = after.voxUnavailable && !before.voxUnavailable;
+  let transition = explicit;
+
+  if (!transition && startedLive) {
+    transition = after.activation === "vox"
+      ? { label: "DJ conectado", reason: "Conexão confirmada pelo Vox" }
+      : after.activation === "confirmation"
+        ? { label: "Entrada confirmada", reason: "Ação do painel" }
+        : after.activation === "marker"
+          ? { label: "DJ conectado", reason: "Marcador reconhecido" }
+          : { label: "DJ conectado", reason: "Detecção confirmada" };
+  } else if (!transition && endedLive) {
+    transition = after.classification === "music"
+      ? { label: "AutoDJ confirmado", reason: "Música normal voltou" }
+      : { label: "Sessão encerrada", reason: "Transmissão deixou de estar ativa" };
+  } else if (!transition && becameOverrun) {
+    transition = { label: "Horário excedido", reason: "O DJ segue conectado após o fim previsto" };
+  } else if (!transition && voxUnavailable) {
+    transition = { label: "Vox indisponível", reason: "A detecção seguirá pela contingência segura" };
+  }
+
+  if (!transition) return after;
+  return {
+    ...after,
+    lastTransition: transition.label,
+    lastTransitionReason: transition.reason,
+    lastTransitionAt: new Date(nowMs).toISOString(),
   };
 }
 
@@ -752,6 +910,7 @@ function serializeDj(row) {
     signatures: normalizeDjSignatures(row.signatures || "").join("\n"),
     djName: row.djName || "",
     programName: row.programName || "",
+    voxLogin: normalizeVoxDjLogin(row.voxLogin),
     logoUrl: normalizeManagedImageUrl(row.logoUrl || ""),
     logoKey: normalizeWebpImageKey(row.logoKey || ""),
     logoWidth: normalizeRunCount(row.logoWidth, 0, 0, DJ_LOGO_SIZE),
@@ -769,6 +928,11 @@ function serializeDj(row) {
     createdAt: iso(row.createdAt) || new Date().toISOString(),
     updatedAt: iso(row.updatedAt) || new Date().toISOString(),
   };
+}
+
+function serializePublicDj(row) {
+  const { voxLogin: _voxLogin, ...publicDj } = serializeDj(row);
+  return publicDj;
 }
 
 function serializeLiveStatus(row) {
@@ -1091,7 +1255,7 @@ async function refreshPublicDataCache() {
     programsData: programsData(content.programs, { publicOnly: true, djs: content.djs }),
     djs: content.djs
       .filter((dj) => dj.active)
-      .map(serializeDj)
+      .map(serializePublicDj)
       .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
       .slice(0, MAX_DJS),
   };
@@ -1181,7 +1345,7 @@ export async function updateAdStats(id, field) {
     };
     content.ads[index] = updated;
     return content;
-  });
+  }, { publish: "none" });
   return updated;
 }
 
@@ -1193,7 +1357,7 @@ export async function listPublicPrograms() {
 export async function listPublicDjs() {
   return (await readSiteContent()).djs
     .filter((dj) => dj.active)
-    .map(serializeDj)
+    .map(serializePublicDj)
     .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
     .slice(0, MAX_DJS);
 }
@@ -1222,7 +1386,22 @@ export async function getLiveStatusTest(options = {}) {
 
 export async function saveLiveStatusTest(payload) {
   const normalized = serializeLiveStatus(normalizeLiveStatusPayload(payload));
-  await updateSiteContent((content) => ({ ...content, liveStatusTest: normalized }));
+  await updateSiteContent((content) => {
+    const previousControl = serializeLiveStatus(content.liveStatusTest).liveDjControl;
+    const nextControl = normalized.liveDjControl;
+    content.liveStatusTest = normalized;
+    if (previousControl?.active !== nextControl?.active) {
+      content.djDetectionState = detectionStateWithTransition(
+        content.djDetectionState,
+        content.djDetectionState,
+        Date.now(),
+        nextControl?.active
+          ? { label: "Sessão manual iniciada", reason: "Ativação manual pelo painel" }
+          : { label: "Sessão manual encerrada", reason: "Desligamento manual pelo painel" },
+      );
+    }
+    return content;
+  }, { publish: "live" });
   return normalized;
 }
 
@@ -1235,6 +1414,45 @@ export async function listAdminDjs() {
     .map(serializeDj)
     .sort((left, right) => left.sortOrder - right.sortOrder || String(right.updatedAt).localeCompare(String(left.updatedAt)))
     .slice(0, MAX_DJS);
+}
+
+export async function getVoxIntegrationStatus() {
+  const content = await readSiteContent();
+  return publicVoxIntegrationStatus(content.voxIntegration);
+}
+
+export async function saveVoxIntegration(payload = {}) {
+  const password = String(payload.password || "");
+  const clearPassword = payload.clearPassword === true;
+  let saved = null;
+
+  await updateSiteContent((content) => {
+    const current = serializeVoxIntegration(content.voxIntegration);
+    const next = {
+      ...current,
+      enabled: payload.enabled === true,
+      port: normalizeVoxPort(payload.port),
+      updatedAt: new Date().toISOString(),
+    };
+    if (password) next.passwordCiphertext = encryptVoxPassword(password);
+    if (clearPassword) next.passwordCiphertext = "";
+    if (next.enabled && !next.port) throw new Error("Informe a porta principal da rádio no Vox.");
+    if (next.enabled && !next.passwordCiphertext) throw new Error("Informe a senha do painel Vox antes de ativar a verificação.");
+    content.voxIntegration = serializeVoxIntegration(next);
+    saved = publicVoxIntegrationStatus(content.voxIntegration);
+    return content;
+  }, { publish: "none" });
+
+  return saved;
+}
+
+export async function getVoxIntegrationCredentials() {
+  const integration = serializeVoxIntegration((await readSiteContent()).voxIntegration);
+  if (!integration.enabled || !integration.port || !integration.passwordCiphertext) return null;
+  return {
+    port: integration.port,
+    password: decryptVoxPassword(integration.passwordCiphertext),
+  };
 }
 
 export async function saveDj(payload) {
@@ -1266,23 +1484,33 @@ export async function saveDj(payload) {
     if (normalized.active && hasDjMarkerConflict(content.djs, normalized)) {
       throw new Error("Já existe outro DJ ativo com o mesmo nome e programa do marcador ao vivo.");
     }
+    if (normalized.active && normalized.voxLogin && hasVoxLoginConflict(content.djs, normalized)) {
+      throw new Error("Este login do Vox já está associado a outro DJ ativo.");
+    }
     previousLogoKey = current?.logoKey || "";
     savedDj = serializeDj(normalized);
     if (index >= 0) content.djs[index] = savedDj;
     else content.djs.push(savedDj);
     if (!savedDj.active) {
       const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
-      if (liveStatusTest.liveDjControl?.stationDjId === savedDj.id) {
+      const manualMatchesDj = liveStatusTest.liveDjControl?.stationDjId === savedDj.id ||
+        Boolean(findConfiguredDj([savedDj], liveStatusTest.liveDjControl));
+      if (liveStatusTest.liveDjControl?.active && manualMatchesDj) {
         content.liveStatusTest = serializeLiveStatus({
           ...liveStatusTest,
           liveDjControl: { ...liveStatusTest.liveDjControl, active: false, stationDjId: null, updatedAt: new Date().toISOString() },
         });
+        content.djDetectionState = detectionStateWithTransition(
+          content.djDetectionState,
+          content.djDetectionState,
+          Date.now(),
+          { label: "Sessão manual encerrada", reason: "DJ desativado no painel" },
+        );
       }
       content.liveStatusTest = serializeLiveStatus({
         ...content.liveStatusTest,
         djSkips: serializeLiveStatus(content.liveStatusTest).djSkips.filter((skip) => skip.djId !== savedDj.id),
       });
-      if (content.djDetectionState?.djId === savedDj.id) content.djDetectionState = defaultDjDetectionState();
     }
     return content;
   });
@@ -1294,6 +1522,15 @@ export async function deleteDj(id) {
   let deleted = null;
   await updateSiteContent((content) => {
     const index = content.djs.findIndex((dj) => dj.id === String(id));
+    const state = normalizeDjDetectionState(content.djDetectionState);
+    const manual = serializeLiveStatus(content.liveStatusTest).liveDjControl;
+    if (
+      index >= 0 &&
+      ((state.djId === String(id) && isLiveDetectionMode(state.mode)) ||
+        (manual?.active && manual.stationDjId === String(id)))
+    ) {
+      throw new Error("Não é possível excluir um DJ que está no ar. Encerre a sessão ou aguarde a desconexão antes de excluir.");
+    }
     if (index >= 0) deleted = serializeDj(content.djs.splice(index, 1)[0]);
     if (deleted) {
       const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
@@ -1897,6 +2134,15 @@ function hasDjMarkerConflict(djs, candidate) {
     .some((dj) => djMarkerKey(dj) === candidateKey);
 }
 
+function hasVoxLoginConflict(djs, candidate) {
+  const candidateLogin = normalizeVoxDjLogin(candidate?.voxLogin);
+  if (!candidateLogin) return false;
+  return djs
+    .map(serializeDj)
+    .filter((dj) => dj.id !== candidate.id && dj.active)
+    .some((dj) => normalizeVoxDjLogin(dj.voxLogin) === candidateLogin);
+}
+
 function djMarkerKey(dj) {
   const djName = comparableAudienceText(dj?.djName);
   const programName = comparableAudienceText(dj?.programName);
@@ -2070,22 +2316,23 @@ export async function getDjDetectionSnapshot(options = {}) {
 
 export async function advanceDjDetectionObservation(observation = {}) {
   const nowMs = Number.isFinite(Number(observation.nowMs)) ? Number(observation.nowMs) : Date.now();
-  const current = await readSiteContent({ forceRefresh: true });
-  const currentSnapshot = resolveDjDetectionSnapshot(current, nowMs, observation);
-  const currentNextState = nextDjDetectionState(currentSnapshot, observation, nowMs);
-  if (sameDjDetectionState(current.djDetectionState, currentNextState)) {
-    return resolveDjDetectionSnapshot(current, nowMs, observation);
-  }
-
-  let result = currentSnapshot;
+  let result = null;
 
   await updateSiteContent((content) => {
     const snapshot = resolveDjDetectionSnapshot(content, nowMs, observation);
-    const nextState = nextDjDetectionState(snapshot, observation, nowMs);
+    const nextState = detectionStateWithTransition(
+      content.djDetectionState,
+      nextDjDetectionState(snapshot, observation, nowMs),
+      nowMs,
+    );
+    if (sameDjDetectionState(content.djDetectionState, nextState)) {
+      result = snapshot;
+      return content;
+    }
     content.djDetectionState = nextState;
     result = resolveDjDetectionSnapshot(content, nowMs, observation);
     return content;
-  });
+  }, { publish: "none" });
 
   return result;
 }
@@ -2107,10 +2354,9 @@ export async function setDjSkippedToday(djId, skipped, nowMs = Date.now()) {
       ? [...remaining, { djId: requestedId, occurrenceKey: occurrence.occurrenceKey, expiresAt: occurrence.expiresAt }]
       : remaining;
     content.liveStatusTest = serializeLiveStatus({ ...current, djSkips, updatedAt: new Date().toISOString() });
-    if (content.djDetectionState?.djId === requestedId) content.djDetectionState = defaultDjDetectionState();
     liveStatusTest = content.liveStatusTest;
     return content;
-  });
+  }, { publish: "none" });
 
   return liveStatusTest;
 }
@@ -2126,10 +2372,12 @@ export async function controlDjLiveSession(djId, action, minutes, nowMs = Date.n
   let result = null;
   await updateSiteContent((content) => {
     const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
-    const djs = content.djs.map(serializeDj).filter((dj) => dj.active);
-    const dj = djs.find((item) => item.id === requestedId);
-    if (!dj) throw new Error("DJ não encontrado ou desativado.");
-    if (resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs)?.source === "manual") {
+    const allDjs = content.djs.map(serializeDj);
+    const dj = allDjs.find((item) => item.id === requestedId);
+    if (!dj) throw new Error("DJ não encontrado.");
+    if (requestedAction === "confirm" && !dj.active) throw new Error("Reative o DJ antes de confirmar uma nova entrada.");
+    const activeDjs = allDjs.filter((item) => item.active);
+    if (resolveConfiguredLiveDjStatus(liveStatusTest, activeDjs, nowMs)?.source === "manual") {
       throw new Error("Desligue a ativação manual antes de controlar a confirmação automática.");
     }
 
@@ -2140,14 +2388,19 @@ export async function controlDjLiveSession(djId, action, minutes, nowMs = Date.n
       : occurrence?.expiresAt || null;
 
     if (requestedAction === "confirm") {
-      content.djDetectionState = createConfirmedDjState(dj, expectedEndAt, nowMs);
+      content.djDetectionState = detectionStateWithTransition(
+        current,
+        createConfirmedDjState(dj, expectedEndAt, nowMs),
+        nowMs,
+        { label: "Entrada confirmada", reason: "Ação do painel" },
+      );
     } else {
       if (current.djId !== dj.id || !isLiveDetectionMode(current.mode)) {
         throw new Error("Este DJ não possui uma sessão automática ativa.");
       }
 
       if (requestedAction === "end") {
-        content.djDetectionState = {
+        content.djDetectionState = detectionStateWithTransition(current, {
           ...defaultDjDetectionState(),
           djId: dj.id,
           expectedEndAt,
@@ -2157,31 +2410,31 @@ export async function controlDjLiveSession(djId, action, minutes, nowMs = Date.n
           observedAt: new Date(nowMs).toISOString(),
           updatedAt: new Date(nowMs).toISOString(),
           signals: ["Sessão encerrada pelo painel"],
-        };
+        }, nowMs, { label: "Sessão encerrada", reason: "Encerramento pelo painel" });
       } else if (requestedAction === "extend") {
         const extension = [30, 60, 120].includes(Number(minutes)) ? Number(minutes) : 30;
         const baseMs = Math.max(nowMs, Date.parse(expectedEndAt || "") || nowMs);
-        content.djDetectionState = {
+        content.djDetectionState = detectionStateWithTransition(current, {
           ...current,
           mode: "live",
           expectedEndAt: new Date(baseMs + extension * 60 * 1000).toISOString(),
           overrunAcknowledgedAt: null,
           updatedAt: new Date(nowMs).toISOString(),
           signals: [...current.signals.filter((signal) => signal !== "Horário excedido"), `Extensão de ${extension} minutos`].slice(-8),
-        };
+        }, nowMs, { label: "Horário estendido", reason: `Extensão de ${extension} minutos` });
       } else {
-        content.djDetectionState = {
+        content.djDetectionState = detectionStateWithTransition(current, {
           ...current,
           overrunAcknowledgedAt: new Date(nowMs).toISOString(),
           updatedAt: new Date(nowMs).toISOString(),
           signals: [...current.signals.filter((signal) => signal !== "Horário excedido"), "Continuidade confirmada pelo painel"].slice(-8),
-        };
+        }, nowMs, { label: "DJ mantido no ar", reason: "Continuidade reconhecida pelo painel" });
       }
     }
 
     result = resolveDjDetectionSnapshot(content, nowMs);
     return content;
-  });
+  }, { publish: "none" });
 
   return result;
 }
@@ -2189,7 +2442,8 @@ export async function controlDjLiveSession(djId, action, minutes, nowMs = Date.n
 function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
   const liveStatusTest = serializeLiveStatus(content.liveStatusTest);
   const config = liveStatusTest.djDetectionConfig;
-  const djs = content.djs.map(serializeDj).filter((dj) => dj.active);
+  const allDjs = content.djs.map(serializeDj);
+  const djs = allDjs.filter((dj) => dj.active);
   const manualLiveDj = resolveConfiguredLiveDjStatus(liveStatusTest, djs, nowMs, content.programs);
   const state = normalizeDjDetectionState(content.djDetectionState);
   const scheduledDj = manualLiveDj ? null : findEligibleDj(djs, liveStatusTest.djSkips, nowMs);
@@ -2198,16 +2452,30 @@ function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
     : null;
   // A DJ who was already confirmed stays on air after the scheduled end only
   // until normal music is confirmed again. A new scheduled DJ always wins.
-  const continuingDj = manualLiveDj || scheduledDj ? null : findOverrunningDj(djs, state);
-  const eligibleDj = markerDj || scheduledDj || continuingDj;
-  const activeOccurrence = scheduledDj ? djScheduleOccurrence(scheduledDj, nowMs) : null;
+  const currentSessionDj = manualLiveDj ? null : findOverrunningDj(allDjs, state);
+  // A schedule change never hides a DJ who is still connected. The next DJ
+  // replaces them only after their own Vox login is actually connected.
+  const continuingDj = currentSessionDj && currentSessionDj.id !== scheduledDj?.id
+    ? currentSessionDj
+    : null;
+  const voxCandidates = manualLiveDj
+    ? []
+    : findVoxDjCandidates(djs, liveStatusTest.djSkips, state, continuingDj, config, nowMs);
+  const voxCandidate = connectedVoxDjCandidate(voxCandidates, observation?.vox?.statuses);
+  const voxDj = voxCandidate?.dj || null;
+  const eligibleDj = voxDj || markerDj || scheduledDj || continuingDj;
+  const activeOccurrence = voxCandidate?.dj.id === eligibleDj?.id
+    ? voxCandidate.occurrence
+    : scheduledDj && scheduledDj.id === eligibleDj?.id
+      ? djScheduleOccurrence(scheduledDj, nowMs)
+      : null;
   const stateMatchesEligibleDj = state.djId === eligibleDj?.id;
   const isDetectedLive = Boolean(
     eligibleDj &&
     !state.forceEnded &&
     isLiveDetectionMode(state.mode) &&
     stateMatchesEligibleDj &&
-    (config.enabled || state.activation === "confirmation"),
+    (config.enabled || state.activation === "confirmation" || state.activation === "vox"),
   );
   const expectedEndAt = stateMatchesEligibleDj
     ? state.expectedEndAt || activeOccurrence?.expiresAt || null
@@ -2227,9 +2495,13 @@ function resolveDjDetectionSnapshot(content, nowMs, observation = null) {
     liveDj,
     eligibleDj,
     markerDj,
+    voxDj,
+    voxCandidates,
+    isDetectionWindowActive: Boolean(scheduledDj || continuingDj || voxCandidates.length > 0),
     config,
     state: effectiveState,
     nextEligibleAt: nextEligibleDjStart(djs, liveStatusTest.djSkips, nowMs),
+    nextDetectionAt: nextVoxEligibleDjStart(djs, liveStatusTest.djSkips, config, nowMs),
     sessionEndsAt: expectedEndAt && Date.parse(expectedEndAt) > nowMs ? expectedEndAt : null,
     expectedEndAt,
     isOverrun,
@@ -2243,7 +2515,7 @@ function nextDjDetectionState(snapshot, observation, nowMs) {
   const classification = ["music", "no-metadata", "unknown"].includes(observation.classification)
     ? observation.classification
     : "unknown";
-  const source = ["metadata", "shoutcast"].includes(observation.source) ? observation.source : "none";
+  const source = ["metadata", "shoutcast", "vox"].includes(observation.source) ? observation.source : "none";
   const diagnostic = normalizeDjDetectionDiagnostic({ ...observation, classification, source }, current);
   const eligibleDj = snapshot.eligibleDj;
   const belongsToEligibleDj = current.djId === eligibleDj?.id;
@@ -2276,6 +2548,29 @@ function nextDjDetectionState(snapshot, observation, nowMs) {
       streamFingerprint,
       signals: ["Sessão encerrada pelo painel"],
     });
+  }
+
+  if (
+    current.activation !== "manual" &&
+    belongsToEligibleDj &&
+    current.djId &&
+    voxStatusForDj(snapshot.voxCandidates, observation?.vox?.statuses, current.djId) === "offline"
+  ) {
+    return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+      classification,
+      source: "vox",
+      signals: ["Desconexão confirmada pelo Vox"],
+    });
+  }
+
+  if (snapshot.voxDj) {
+    return createVoxDjState(
+      eligibleDj,
+      belongsToEligibleDj ? expectedEndAt || snapshot.sessionEndsAt : snapshot.sessionEndsAt,
+      diagnostic,
+      nowMs,
+      streamFingerprint,
+    );
   }
 
   if (snapshot.markerDj) {
@@ -2415,6 +2710,7 @@ function stateFromObservation(current, diagnostic, nowMs, patch = {}) {
     observedAt: diagnostic.observedAt,
     latencyMs: diagnostic.latencyMs,
     lastError: diagnostic.lastError,
+    voxUnavailable: diagnostic.voxUnavailable,
     updatedAt: new Date(nowMs).toISOString(),
   };
 }
@@ -2448,13 +2744,29 @@ function createMarkerDjState(dj, expectedEndAt, diagnostic, nowMs, streamFingerp
   });
 }
 
+function createVoxDjState(dj, expectedEndAt, diagnostic, nowMs, streamFingerprint) {
+  return stateFromObservation(defaultDjDetectionState(), diagnostic, nowMs, {
+    mode: isPast(expectedEndAt, nowMs) ? "overrun" : "live",
+    djId: dj.id,
+    confidence: 100,
+    activation: "vox",
+    classification: diagnostic.classification,
+    source: "vox",
+    expectedEndAt,
+    streamFingerprint,
+    signals: ["Conexão do DJ confirmada pelo Vox"],
+  });
+}
+
 function normalizeDjDetectionDiagnostic(value, state = null) {
   return {
     classification: ["music", "no-metadata", "unknown"].includes(value?.classification) ? value.classification : "unknown",
-    source: ["metadata", "shoutcast", "marker", "confirmation"].includes(value?.source) ? value.source : "none",
+    source: ["metadata", "shoutcast", "marker", "confirmation", "vox"].includes(value?.source) ? value.source : "none",
     observedAt: iso(value?.observedAt) || new Date().toISOString(),
     latencyMs: Number.isFinite(Number(value?.latencyMs)) ? Math.max(0, Math.round(Number(value.latencyMs))) : null,
+    cacheHit: value?.cacheHit === true,
     lastError: String(value?.lastError || "").trim().slice(0, 240) || null,
+    voxUnavailable: value?.voxUnavailable === true,
     confidence: normalizeRunCount(value?.confidence ?? state?.confidence, 0, 0, 100),
     signals: Array.isArray(value?.signals) ? value.signals.map(String).filter(Boolean).slice(0, 8) : (state?.signals || []),
   };
@@ -2533,12 +2845,14 @@ function markerMatchesDj(dj, marker) {
 function liveDjMatchSource(activation) {
   if (activation === "marker") return "marker";
   if (activation === "confirmation") return "confirmed";
+  if (activation === "vox") return "vox";
   return "detection";
 }
 
 function liveDjDescription(state, continuingDj, isOverrun) {
   if (state.activation === "marker") return "marcador confirmado pelo encoder";
   if (state.activation === "confirmation") return "entrada confirmada pelo painel";
+  if (state.activation === "vox") return "conexão confirmada pelo Vox";
   if (isOverrun || continuingDj) return "transmissão continuada após o horário";
   return "metadados ausentes confirmados";
 }
@@ -2547,6 +2861,85 @@ function findEligibleDj(djs, skips, nowMs) {
   return djs
     .filter((dj) => dj.scheduleEnabled && isDjScheduleActive(dj, nowMs) && !isDjSkipped(dj, skips, nowMs))
     .sort((left, right) => left.sortOrder - right.sortOrder || left.startTime.localeCompare(right.startTime))[0] || null;
+}
+
+function findVoxDjCandidates(djs, skips, state, continuingDj, config, nowMs) {
+  const parts = saoPauloTimeParts(nowMs);
+  const earlyWindowMs = (Number(config?.earlyWindowMinutes) || 0) * 60 * 1000;
+  const candidates = [];
+  const seen = new Set();
+
+  for (let offset = -1; offset <= 1; offset += 1) {
+    const date = shiftSaoPauloDate(parts, offset);
+    const dayId = DAY_ORDER[new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay()] || "Sun";
+    for (const dj of djs) {
+      if (!dj.scheduleEnabled || !dj.voxLogin || !dj.dayIds.includes(dayId)) continue;
+      const occurrence = djScheduleOccurrenceForDate(dj, date);
+      if (!occurrence || isDjOccurrenceSkipped(dj, skips, occurrence)) continue;
+      if (nowMs < occurrence.startsAt - earlyWindowMs || nowMs > occurrence.endsAt) continue;
+      const key = `${dj.id}:${occurrence.occurrenceKey}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({
+        dj,
+        occurrence,
+        priorityAt: occurrence.startsAt,
+        isEarly: nowMs < occurrence.startsAt,
+      });
+    }
+  }
+
+  if (continuingDj?.voxLogin && !candidates.some((candidate) => candidate.dj.id === continuingDj.id)) {
+    candidates.push({
+      dj: continuingDj,
+      occurrence: {
+        occurrenceKey: `continuing:${continuingDj.id}`,
+        startsAt: 0,
+        endsAt: Date.parse(state.expectedEndAt || "") || nowMs,
+        expiresAt: state.expectedEndAt || null,
+      },
+      priorityAt: 0,
+      isEarly: false,
+    });
+  }
+
+  return candidates.sort((left, right) => left.priorityAt - right.priorityAt);
+}
+
+function connectedVoxDjCandidate(candidates, statuses) {
+  const statusMap = statuses && typeof statuses === "object" ? statuses : {};
+  return candidates
+    .filter((candidate) => statusMap[normalizeVoxDjLogin(candidate.dj.voxLogin)]?.status === "online")
+    .sort((left, right) => right.priorityAt - left.priorityAt)[0] || null;
+}
+
+function voxStatusForDj(candidates, statuses, djId) {
+  const candidate = candidates.find((item) => item.dj.id === djId);
+  if (!candidate) return "unknown";
+  return statuses?.[normalizeVoxDjLogin(candidate.dj.voxLogin)]?.status || "unknown";
+}
+
+function djScheduleOccurrenceForDate(dj, date) {
+  if (!dj?.scheduleEnabled) return null;
+  const start = timeToMinutes(dj.startTime);
+  const end = timeToMinutes(dj.endTime);
+  const endDate = shiftSaoPauloDate(date, start > end ? 1 : 0);
+  const startsAt = saoPauloLocalEpoch(date, start);
+  const endsAt = saoPauloLocalEpoch(endDate, end);
+  return {
+    occurrenceKey: saoPauloDateKey(date),
+    startsAt,
+    endsAt,
+    expiresAt: new Date(endsAt).toISOString(),
+  };
+}
+
+function isDjOccurrenceSkipped(dj, skips, occurrence) {
+  return skips.some((skip) =>
+    skip.djId === dj.id &&
+    skip.occurrenceKey === occurrence.occurrenceKey &&
+    Date.parse(skip.expiresAt) > occurrence.startsAt,
+  );
 }
 
 function findOverrunningDj(djs, state) {
@@ -2571,11 +2964,7 @@ function djScheduleOccurrence(dj, nowMs) {
   const end = timeToMinutes(dj.endTime);
   const startsPreviousDay = start > end && parts.minuteOfDay < end;
   const startDate = shiftSaoPauloDate(parts, startsPreviousDay ? -1 : 0);
-  const endDate = shiftSaoPauloDate(startDate, start > end ? 1 : 0);
-  return {
-    occurrenceKey: saoPauloDateKey(startDate),
-    expiresAt: new Date(saoPauloLocalEpoch(endDate, end)).toISOString(),
-  };
+  return djScheduleOccurrenceForDate(dj, startDate);
 }
 
 function djSkipOccurrence(dj, nowMs) {
@@ -2609,6 +2998,27 @@ function nextEligibleDjStart(djs, skips, nowMs) {
       const skipped = skips.some((skip) => skip.djId === dj.id && skip.occurrenceKey === occurrenceKey && Date.parse(skip.expiresAt) > startMs);
       if (skipped) continue;
       if (!nearest || startMs < nearest) nearest = startMs;
+    }
+  }
+
+  return nearest ? new Date(nearest).toISOString() : null;
+}
+
+function nextVoxEligibleDjStart(djs, skips, config, nowMs) {
+  const nowParts = saoPauloTimeParts(nowMs);
+  const earlyWindowMs = (Number(config?.earlyWindowMinutes) || 0) * 60 * 1000;
+  let nearest = null;
+
+  for (let offset = 0; offset <= 7; offset += 1) {
+    const date = shiftSaoPauloDate(nowParts, offset);
+    const dayId = DAY_ORDER[new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay()] || "Sun";
+    for (const dj of djs) {
+      if (!dj.active || !dj.scheduleEnabled || !dj.voxLogin || !dj.dayIds.includes(dayId)) continue;
+      const occurrence = djScheduleOccurrenceForDate(dj, date);
+      if (!occurrence || isDjOccurrenceSkipped(dj, skips, occurrence)) continue;
+      const startsAt = occurrence.startsAt - earlyWindowMs;
+      if (startsAt <= nowMs) continue;
+      if (!nearest || startsAt < nearest) nearest = startsAt;
     }
   }
 
@@ -2679,6 +3089,8 @@ function liveDjStatusFromDj(dj, matchedSignature, detectedValue, programs = []) 
           ? "marker"
           : matchedSignature === "confirmed"
             ? "confirmed"
+            : matchedSignature === "vox"
+              ? "vox"
             : "dj",
     // The DJ artwork comes first; the program artwork is the branded fallback.
     logoUrl: liveDjArtwork(dj, programs),
